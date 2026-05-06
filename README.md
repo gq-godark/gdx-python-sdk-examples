@@ -98,7 +98,7 @@ export GODARK_API_KEY_ID="gdk_your_key_id"
 export GODARK_API_SECRET="your_secret"
 export GODARK_EDGE_URL="wss://api.godark-dex.com"
 export GDX_REST_URL="https://api.godark-dex.com/api/v1"
-bash examples/run_all_examples.sh
+bash scripts/run_all_examples.sh
 ```
 
 The script runs:
