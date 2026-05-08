@@ -37,4 +37,4 @@ cp "$SRC/shared/symbols.json" "$DEST_SDK/shared/symbols.json"
 
 echo "Vendored size:"
 du -sh "$DEST_SDK"
-echo "Run: (cd \"$REPO_ROOT\" && bash scripts/setup_pypy.sh) to reinstall the venv."
+echo "Run: (cd \"$REPO_ROOT\" && bash scripts/setup_venv.sh) to reinstall the venv."

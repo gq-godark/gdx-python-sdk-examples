@@ -35,6 +35,10 @@ asyncio.run(main())
 
 (`base_url=` may omit the `/ws/v1` suffix — the SDK appends it.)
 
+## Installation (MM bundle)
+
+Recipients run `bash scripts/setup_venv.sh` after copying `.env.example` → `.env`. If the bundle includes `wheels/godark-*.whl`, that wheel is installed first; otherwise the vendored `sdk/` directory is installed with pip. Runtime dependencies resolve from PyPI.
+
 ## Configuration
 
 | Env var | Meaning |
@@ -171,7 +175,7 @@ numeric `error_code` (see `godark.order_error_code.ORDER_ERROR_CODES` upstream).
 | `examples/quickstart.py` | Fast smoke (`LIMIT` placement + cancel) |
 | `examples/full_trader_example.py` | Full push surface + richer flow |
 | `examples/dotenv.py` | Lightweight `.env` loader + rejection printer |
-| `scripts/setup_pypy.sh` | `pip install ./sdk` into `.venv-pypy` |
+| `scripts/setup_venv.sh` | Create `.venv`, install wheel or `pip install ./sdk` |
 
 ## SDK layout (`sdk/`)
 

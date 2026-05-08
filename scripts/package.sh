@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Package examples + docs + vendored sdk + wheel into one tarball for MMs.
+# MM tarball packager — mirrors the layout of other godark-*-examples bundles:
+# vendored sdk/, built wheel for pip installs, examples, docs, credential template.
+# Internal-only scripts (this file, refresh_sdk.sh) are not shipped.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DIST_NAME="${1:-godark-python-examples-linux-x86_64}"
+DIST_NAME="${1:-godark-python-examples}"
 
 cd "$REPO_ROOT"
 
@@ -37,13 +39,12 @@ cp "${REPO_ROOT}/sdk/dist-wheels"/*.whl "$DEST/wheels/"
 cp "${REPO_ROOT}/sdk/dist-wheels"/*.whl "$DEST/sdk/dist-wheels/"
 
 cp "${REPO_ROOT}/examples/"*.py "$DEST/examples/"
-cp "${REPO_ROOT}/scripts/setup_pypy.sh" "$DEST/scripts/"
-cp "${REPO_ROOT}/scripts/package.sh" "$DEST/scripts/" 2>/dev/null || true
+cp "${REPO_ROOT}/scripts/setup_venv.sh" "$DEST/scripts/"
 cp "${REPO_ROOT}/.env.example" "$DEST/"
 cp "${REPO_ROOT}/README.md" "$DEST/"
 cp "${REPO_ROOT}/SDK_REFERENCE.md" "$DEST/"
 
-chmod +x "$DEST/scripts/setup_pypy.sh"
+chmod +x "$DEST/scripts/setup_venv.sh"
 
 ARCHIVE="$REPO_ROOT/${DIST_NAME}.tar.gz"
 tar -czf "$ARCHIVE" -C "$STAGING_DIR" "$DIST_NAME"
@@ -51,4 +52,4 @@ rm -rf "$STAGING_DIR"
 
 echo "Package created: $ARCHIVE"
 echo "Contents:"
-tar -tzf "$ARCHIVE" | head -40
+tar -tzf "$ARCHIVE" | head -45 || true
