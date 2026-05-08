@@ -10,7 +10,9 @@ import os
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
-from typing import Any
+from typing import Any, TypeVar
+
+TStream = TypeVar("TStream")
 
 from . import _crypto, _identity, _proto  # noqa: F401 (_crypto registers protobuf codecs)
 from ._session import CryptoSession
@@ -448,7 +450,7 @@ class GodarkClient:
         async for u in self._queue_iter(self._position_queue):
             yield u
 
-    async def _queue_iter[T](self, queue: asyncio.Queue[T]) -> AsyncIterator[T]:
+    async def _queue_iter(self, queue: asyncio.Queue[TStream]) -> AsyncIterator[TStream]:
         while self._connected or not queue.empty():
             try:
                 item = await asyncio.wait_for(queue.get(), timeout=1.0)
