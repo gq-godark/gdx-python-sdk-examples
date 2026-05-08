@@ -128,7 +128,7 @@ class GodarkClient:
         api_key_id: Key-pair public ID (use with ``api_secret``).
         api_secret: Key-pair secret (use with ``api_key_id``).
         base_url: Edge WebSocket origin (host only, e.g.
-            ``wss://api.godarkdex.com``). The client appends ``/ws/v1`` to
+            ``wss://api.godark-dex.com``). The client appends ``/ws/v1`` to
             produce the final upgrade URL. Defaults to production; override
             with arg or ``GODARK_EDGE_URL`` / ``GDX_EDGE_URL`` env vars.
         user_uuid: Fallback user UUID when the edge auth response omits it
