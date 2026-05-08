@@ -17,10 +17,18 @@ concurrency:
 
 jobs:
   # --------------------------------------------------------------------------
-  # build: wheels-only zip + import smoke. No secrets, no network beyond PyPI.
-  # Runs for every push and every PR. Uploads the zip as a workflow artifact
-  # which the `release` job consumes — guaranteeing it publishes the *same
-  # bytes* that were just verified.
+  # build: wheels-only zip + import smoke.
+  #
+  # The wheel is built from a fresh checkout of gq-godark/gdx-python-sdk@<ref>
+  # where <ref> is read from sdk/UPSTREAM_REF in this repo. The vendored
+  # sdk/godark/ tree is verified to match that upstream source by a parity
+  # check inside scripts/package.sh — local edits to sdk/godark/ cannot reach
+  # the released artifact.
+  #
+  # Required secret:
+  #   GDX_PYTHON_SDK_TOKEN — PAT or fine-grained token with `contents:read`
+  #                          on gq-godark/gdx-python-sdk. Used only to clone
+  #                          the upstream repo at the pinned ref.
   # --------------------------------------------------------------------------
   build:
     name: Build wheels-only zip
@@ -29,8 +37,9 @@ jobs:
     outputs:
       version: ${{ steps.ver.outputs.version }}
       bundle_name: ${{ steps.ver.outputs.bundle_name }}
+      pinned_ref: ${{ steps.pin.outputs.ref }}
     steps:
-      - name: Checkout
+      - name: Checkout examples repo
         uses: actions/checkout@v4
 
       - name: Set up Python 3.12
@@ -42,17 +51,53 @@ jobs:
       - name: Install zip
         run: sudo apt-get update -qq && sudo apt-get install -y -qq zip
 
+      - name: Verify GDX_PYTHON_SDK_TOKEN secret is configured
+        env:
+          UPSTREAM_TOKEN: ${{ secrets.GDX_PYTHON_SDK_TOKEN }}
+        run: |
+          if [ -z "$UPSTREAM_TOKEN" ]; then
+            echo "::error::Missing required secret GDX_PYTHON_SDK_TOKEN."
+            echo "::error::Create a PAT (or fine-grained token) with contents:read on gq-godark/gdx-python-sdk and add it under repo Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
+      - name: Read pinned upstream ref
+        id: pin
+        run: |
+          if [ ! -f sdk/UPSTREAM_REF ]; then
+            echo "::error::sdk/UPSTREAM_REF missing — run scripts/refresh_sdk.sh and commit it."
+            exit 1
+          fi
+          ref="$(tr -d '[:space:]' < sdk/UPSTREAM_REF)"
+          if [ -z "$ref" ]; then
+            echo "::error::sdk/UPSTREAM_REF is empty"
+            exit 1
+          fi
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "Pinned upstream ref: ${ref}"
+
+      - name: Checkout pinned upstream gdx-python-sdk
+        uses: actions/checkout@v4
+        with:
+          repository: gq-godark/gdx-python-sdk
+          ref: ${{ steps.pin.outputs.ref }}
+          path: upstream
+          token: ${{ secrets.GDX_PYTHON_SDK_TOKEN }}
+          fetch-depth: 1
+
       - name: Compute version + bundle name
         id: ver
         run: |
-          base=$(python3 -c "import tomllib; print(tomllib.load(open('sdk/pyproject.toml','rb'))['project']['version'])")
+          base=$(python3 -c "import tomllib; print(tomllib.load(open('upstream/pyproject.toml','rb'))['project']['version'])")
           version="v${base}-build.${{ github.run_number }}"
           bundle_name="gdx-python-sdk-${version}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "bundle_name=${bundle_name}" >> "$GITHUB_OUTPUT"
-          echo "Building ${bundle_name}.zip"
+          echo "Building ${bundle_name}.zip (godark==${base} from upstream pin ${{ steps.pin.outputs.ref }})"
 
       - name: Build wheels-only zip via scripts/package.sh
+        env:
+          UPSTREAM_SRC: ${{ github.workspace }}/upstream
         run: bash scripts/package.sh ${{ steps.ver.outputs.bundle_name }}
 
       - name: Recipient install + import smoke (clean venv)
@@ -106,6 +151,9 @@ jobs:
           files: ./release-asset/${{ needs.build.outputs.bundle_name }}.zip
           body: |
             **Automated release** built from commit `${{ github.sha }}`.
+
+            Wheel built from upstream `gq-godark/gdx-python-sdk` at pinned ref
+            `${{ needs.build.outputs.pinned_ref }}`.
 
             ## Install
 
