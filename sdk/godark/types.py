@@ -1,0 +1,147 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+
+from .enums import CancelReason, OrderStatus, OrderUpdateType, PositionUpdateType, Side
+
+
+@dataclass(frozen=True)
+class OrderAck:
+    order_id: str
+    success: bool
+    sequence: str
+    error_code: str | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class OrderUpdate:
+    order_id: str
+    user_uuid: str
+    symbol_id: int
+    side: Side
+    status: OrderStatus
+    update_type: OrderUpdateType
+    price: str
+    quantity: str
+    filled_qty: str
+    remaining_qty: str
+    cum_fill: str
+    cancel_reason: CancelReason | None = None
+    reject_reason: str | None = None
+    correlation_id: int = 0
+    timestamp: int = 0
+    #: Client-selected leverage at order-placement time (1 = 1x).
+    leverage: int = 0
+    #: Realized PnL on closing / terminal fills; omitted when absent on wire.
+    realized_pnl: str | None = None
+
+
+@dataclass(frozen=True)
+class PositionUpdate:
+    user_uuid: str
+    symbol_id: int
+    side: Side
+    update_type: PositionUpdateType
+    size: str
+    entry_price: str
+    previous_size: str
+    fill_price: str
+    fill_qty: str
+    correlation_id: int = 0
+    timestamp: int = 0
+
+
+class PositionsSnapshotSource(str, Enum):
+    UNSPECIFIED = "UNSPECIFIED"
+    INITIAL = "INITIAL"
+    PERIODIC = "PERIODIC"
+    EVENT = "EVENT"
+
+
+@dataclass(frozen=True)
+class PositionRow:
+    symbol_id: int
+    side: Side
+    size: str
+    entry_price: str
+    leverage: int
+    mark_price: str | None = None
+    unrealized_pnl: str | None = None
+    notional: str | None = None
+    mark_publish_time_sec: int | None = None
+
+
+@dataclass(frozen=True)
+class PositionsSnapshot:
+    user_uuid: str
+    rows: tuple[PositionRow, ...]
+    server_timestamp: int
+    source: PositionsSnapshotSource
+    #: Echoed SubscribePositions correlation where present (protobuf bytes → uint128 big-endian).
+    correlation_id: int | None = None
+
+
+@dataclass(frozen=True)
+class SystemHealthUpdate:
+    total_nodes: int
+    accepting_orders: bool
+    ready: int
+    degraded: int
+    exhausted: int
+    warming: int
+    draining: int
+    waiting: int
+
+
+@dataclass(frozen=True)
+class BalanceUpdate:
+    user_uuid: str
+    shielded_balance_raw: int
+    timestamp: int
+
+
+@dataclass(frozen=True)
+class MarginAlert:
+    owner: str
+    symbol_id: int
+    tier: int
+    margin_ratio_bps: int
+    mark_price_bps: int
+    liquidation_price_bps: int
+    ts: int
+    state_version: int
+    recovered: bool
+
+
+@dataclass(frozen=True)
+class FundingRateUpdate:
+    symbol_id: int
+    current_rate: str
+    predicted_rate: str
+    next_funding_time: int
+    timestamp: int
+
+
+class SettlementBatchStatus(str, Enum):
+    UNSPECIFIED = "UNSPECIFIED"
+    SUBMITTED = "SUBMITTED"
+    CONFIRMED = "CONFIRMED"
+    FAILED = "FAILED"
+
+
+@dataclass(frozen=True)
+class SettlementUpdate:
+    batch_id: int
+    status: SettlementBatchStatus
+    tx_signature: str
+    timestamp: int
+    affected_user_uuids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class UnknownSequencerPush:
+    """Decoded outer message with an inner variant this SDK revision does not map."""
+
+    oneof_field: str | None = None

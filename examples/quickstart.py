@@ -1,45 +1,66 @@
 #!/usr/bin/env python3
-"""GoDark SDK quickstart (Python): connect -> place limit sell -> cancel."""
+"""Minimal darkpool MM example — place far-from-market LIMIT SELL then cancel."""
 
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 
-from godark import GodarkClient, OrderType, Side
+from dotenv import load_dotenv, print_order_error
+from godark import GodarkClient, OrderType, Side, TimeInForce
 
-from common import require_credentials, ws_base
+SYMBOL = "BTC-USDC-PERP"
 
 
-async def main() -> None:
-    key_id, secret = require_credentials()
+async def main() -> int:
+    load_dotenv()
 
-    client = GodarkClient(
-        api_key_id=key_id,
-        api_secret=secret,
-        base_url=ws_base(),
-        auto_reconnect=False,
+    api_key_id = os.environ.get("GODARK_API_KEY_ID", "").strip()
+    api_secret = os.environ.get("GODARK_API_SECRET", "").strip()
+    if not api_key_id or not api_secret:
+        print(
+            "Missing credentials: set GODARK_API_KEY_ID and GODARK_API_SECRET "
+            "(e.g. in a .env file at the repo root).",
+            file=sys.stderr,
+        )
+        return 1
+
+    base_url = (
+        os.environ.get("GODARK_EDGE_URL", "").strip()
+        or "wss://api.godark-dex.com"
     )
 
-    await client.connect()
-    print(f"Connected as user_uuid={client.user_uuid}")
-    await client.subscribe(["orders", "positions"])
+    try:
+        async with GodarkClient(
+            api_key_id=api_key_id,
+            api_secret=api_secret,
+            base_url=base_url,
+        ) as client:
+            user = client.user_uuid or ""
+            print(f"Connected as user_uuid={user}")
+            try:
+                ack = await client.place_order(
+                    SYMBOL,
+                    Side.SELL,
+                    OrderType.LIMIT,
+                    0.01,
+                    price=999_999.0,
+                    time_in_force=TimeInForce.GTC,
+                )
+                print(f"Place OK — order_id={ack.order_id}")
+                cancel_ack = await client.cancel_order(str(ack.order_id), SYMBOL)
+                print(f"Cancel OK — order_id={cancel_ack.order_id}")
+            except Exception as e:
+                print_order_error("Order rejected", e)
+                return 1
+    except Exception as e:
+        print(f"{e}", file=sys.stderr)
+        return 1
 
-    symbol = "BTC-USDT-PERP"
-    ack = await client.place_order(
-        symbol=symbol,
-        side=Side.SELL,
-        order_type=OrderType.LIMIT,
-        quantity=0.001,
-        price=999999.0,
-    )
-    print(f"Place OK: order_id={ack.order_id}")
-
-    cancel = await client.cancel_order(order_id=ack.order_id, symbol=symbol)
-    print(f"Cancel OK: order_id={cancel.order_id}")
-
-    await client.disconnect()
     print("Disconnected")
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(asyncio.run(main()))

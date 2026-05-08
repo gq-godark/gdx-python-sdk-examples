@@ -1,135 +1,128 @@
-# Godark Python SDK examples
+# GoDark Python Examples (Darkpool MM distribution)
 
-Sample programs that consume the published `godark` package using a **PyPy**
-virtual environment. This mirrors the intent of `gdx-cpp-sdk-examples`: examples
-repo is independent from SDK source checkout.
+Self-contained trading examples with the `godark` SDK vendored under `sdk/`.
 
-Credentials can be loaded from a local `.env` file (recommended) or from shell
-environment variables.
+- Two MM-facing examples (`quickstart`, `full_trader_example`).
+- Install from `sdk/` with `pip` — no private package index required.
+- Pre-generated protobuf stubs live in `sdk/godark/_generated/`; **no `protoc`**
+  needed.
+- Minimal `.env` workflow at the repo root.
 
-## Prerequisites
+## Two ways to use
 
-- `pypy3` (recommended: PyPy 3.10+)
-- Access to a package index that serves `godark`
-- API credentials for private trading examples:
-  - `GODARK_API_KEY_ID`
-  - `GODARK_API_SECRET`
+### A — tarball (no editable checkout)
 
-## Setup (PyPy)
-
-From this repository root:
+Unpack the archive you received, copy `.env.example` → `.env`, then:
 
 ```bash
 bash scripts/setup_pypy.sh
 source .venv-pypy/bin/activate
+cd examples && python quickstart.py
+python full_trader_example.py
 ```
 
-This creates `.venv-pypy` and installs `godark` from your configured package
-index.
-
-If the package is not available on the index, setup falls back in this order:
-1. `GODARK_GIT_SPEC` (if provided)
-2. local sibling checkout at `../gdx-python-sdk` (editable install)
-
-Runtime behavior:
-- Prefers `pypy3` when its Python version is `>=3.10`
-- Falls back to `python3` when installed PyPy is too old for `godark`
-- Set `FORCE_PYPY=1` to fail instead of falling back
-
-If `pypy3` is missing, the script bootstraps it via `apt-get` (`sudo` if available).
-To auto-activate in the current shell, run:
+(Optional) Install the bundled wheel instead of `pip install sdk/`:
 
 ```bash
-source scripts/setup_pypy.sh
+pip install wheels/godark-*.whl
 ```
 
-Running `bash scripts/setup_pypy.sh` in an interactive terminal now opens a new
-activated shell automatically (exit that shell to return).
-
-Optional version pin:
+### B — Clone this repository
 
 ```bash
-GODARK_PYPI_SPEC="godark==0.1.0" bash scripts/setup_pypy.sh
+bash scripts/setup_pypy.sh
+source .venv-pypy/bin/activate
+cd examples && python quickstart.py
 ```
 
-Optional git source:
+## Platforms
 
-```bash
-GODARK_GIT_SPEC="git+https://github.com/gq-godark/gdx-python-sdk.git" bash scripts/setup_pypy.sh
-```
+| Item | Requirement |
+|------|--------------|
+| Python | ≥ 3.10 (PyPy 3.10+ or CPython) |
+| OS | Linux x86_64 recommended for parity with packaged tarballs |
+| Crypto | Uses `cryptography` (OpenSSL 3 typical on Ubuntu 22.04/24.04) |
 
-## Examples
+## Testnet onboarding
 
-| Script | Path | What it does |
-|--------|------|--------------|
-| `quickstart` | `examples/quickstart.py` | Minimal connect -> limit sell -> cancel. |
-| `e2e_trading_smoke` | `examples/e2e_trading_smoke.py` | CI-friendly auth-only or full place+cancel smoke check. |
-| `market_data_example` | `examples/market_data_example.py` | Public gomarket orderbook + trades (no keys). |
-| `full_trader_example` | `examples/full_trader_example.py` | Expanded demo: callbacks, stream drain, place/modify/cancel. |
-| `full_trader_rest` | `examples/full_trader_rest.py` | REST client flow: encrypted place + fetch + cancel by id. |
+1. Open `https://app.godark-dex.com`
+2. Create an account (email sign-up).
+3. Fund via `https://faucet.godark-dex.com`
+4. Settings → API Key Management → create a key pair.
 
-## Configure environment
-
-Copy the template and fill in your credentials:
+## Configure credentials
 
 ```bash
 cp .env.example .env
 ```
 
-The `.env` file is gitignored. Keep `.env.example` checked in with safe placeholder values.
+Set:
 
-## Run
+- `GODARK_API_KEY_ID`
+- `GODARK_API_SECRET`
+- `GODARK_EDGE_URL` (optional; defaults to `wss://api.godark-dex.com`)
 
-```bash
-source .venv-pypy/bin/activate
+Optional local edge override example:
 
-set -a
-source .env
-set +a
-
-# 1) Auth + ECDH only
-python examples/e2e_trading_smoke.py --auth-only
-
-# 2) Full WS trading smoke
-python examples/e2e_trading_smoke.py
-
-# 3) Market data only
-python examples/market_data_example.py --symbol ETH-USDT-PERP
+```
+GODARK_EDGE_URL=ws://127.0.0.1:4000
 ```
 
-## Run all examples
+The client normalizes trailing `/ws`, `/ws/v1`, etc. (`ws://host:4000` and
+`ws://host:4000/ws/v1` both resolve to the same trading socket).
 
-The helper script auto-loads `.env` if present:
+Some local edge setups require user UUID propagation; set:
 
-```bash
-source .venv-pypy/bin/activate
-bash scripts/run_all_examples.sh
+```
+GODARK_USER_UUID=<uuid-from-auth-result>
 ```
 
-The script runs:
-1. `market_data_example.py` (short public smoke)
-2. `e2e_trading_smoke.py --auth-only`
-3. `e2e_trading_smoke.py` (place/cancel)
-4. `quickstart.py`
-5. `full_trader_rest.py`
-6. `full_trader_example.py`
+## Examples
 
-## Environment quick reference
+| Script | Purpose |
+|--------|---------|
+| `examples/quickstart.py` | Connect → LIMIT sell far from touch → cancel |
+| `examples/full_trader_example.py` | All push callbacks + place / modify / cancel + summary |
 
-- **Trading WS examples**
-  - `GODARK_API_KEY_ID` / `GDX_API_KEY_ID`
-  - `GODARK_API_SECRET` / `GDX_API_SECRET`
-  - `GODARK_EDGE_URL` / `GDX_EDGE_URL` (default: `wss://api.godark-dex.com`)
-- **REST example**
-  - `GDX_REST_URL` / `GODARK_REST_BASE` (default: `https://api.godark-dex.com/api/v1`)
-- **TLS (optional)**
-  - `GODARK_TLS_SKIP_VERIFY=1` / `GDX_TLS_SKIP_VERIFY=1`
+This distribution exposes **LIMIT** and **MARKET** placement only via the MM
+samples (other pegged types remain in the vendored enums for completeness).
+
+## Packaging for market makers
+
+```bash
+bash scripts/package.sh          # godark-python-examples-linux-x86_64.tar.gz
+bash scripts/package.sh my-dist  # custom archive name stem
+```
 
 ## Layout
 
-| Path | Purpose |
-|------|---------|
-| `.env.example` | Template for local runtime variables |
-| `scripts/setup_pypy.sh` | Creates PyPy venv and installs `godark` package |
-| `examples/common.py` | Shared env/config helpers |
-| `examples/*.py` | Runnable examples |
+```
+./
+├── README.md               # This file
+├── SDK_REFERENCE.md        # Detailed API cheat sheet (MM-oriented)
+├── .env.example
+├── examples/
+│   ├── dotenv.py           # `load_dotenv` + `print_order_error`
+│   ├── quickstart.py
+│   └── full_trader_example.py
+├── scripts/
+│   ├── setup_pypy.sh       # Bootstrap venv + pip install ./sdk
+│   ├── refresh_sdk.sh      # Re-vendor sdk from a sibling gdx-python-sdk
+│   └── package.sh          # Tarball exporter
+└── sdk/
+    ├── pyproject.toml      # Hatchling wheel/manifest for `godark`
+    ├── README.md
+    ├── shared/symbols.json
+    └── godark/             # SDK source (+ committed `_generated` protos)
+```
+
+## Refreshing `sdk/` (internal)
+
+From a sibling development checkout:
+
+```bash
+./scripts/refresh_sdk.sh /path/to/gdx-python-sdk
+```
+
+Then remove `.venv-pypy` (or rerun `scripts/setup_pypy.sh`) so the refreshed
+sources are pip-installed clean.

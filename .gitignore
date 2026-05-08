@@ -1,29 +1,13 @@
-# Python bytecode/cache
-__pycache__/
-*.py[cod]
-*$py.class
-
-# Virtual environments
-.venv/
-.venv-pypy/
-venv/
+/.venv-pypy/
+/.venv/
 .env
-
-# Build/distribution artifacts
-build/
-dist/
+__pycache__/
+*.pyc
 *.egg-info/
-.eggs/
-
-# Test and tooling caches
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# IDE/editor
-.idea/
-.vscode/
-
-# OS files
-.DS_Store
-Thumbs.db
+/build/
+/dist/
+/dist-wheels/
+/sdk/build/
+/sdk/*.egg-info/
+/sdk/dist-wheels/
+*.tar.gz
