@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "godark"
+version = "0.1.0"
+description = "Python SDK for the GoDark DEX — encrypted trading over WebSocket (vendored MM distribution)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "websockets>=13.0",
+    "cryptography>=42.0",
+    "protobuf>=5.0",
+    "httpx>=0.27",
+]
+
+[project.urls]
+Homepage = "https://godark.exchange"
+
+[tool.hatch.build.targets.wheel]
+packages = ["godark"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"shared/symbols.json" = "godark/symbols.json"

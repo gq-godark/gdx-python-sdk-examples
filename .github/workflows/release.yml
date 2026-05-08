@@ -1,0 +1,127 @@
+name: CI / Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Cancel in-flight runs of the same PR (so updates don't pile up runners), but
+# never cancel a push-to-main run — releases are precious.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # --------------------------------------------------------------------------
+  # build: wheels-only zip + import smoke. No secrets, no network beyond PyPI.
+  # Runs for every push and every PR. Uploads the zip as a workflow artifact
+  # which the `release` job consumes — guaranteeing it publishes the *same
+  # bytes* that were just verified.
+  # --------------------------------------------------------------------------
+  build:
+    name: Build wheels-only zip
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      bundle_name: ${{ steps.ver.outputs.bundle_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install zip
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zip
+
+      - name: Compute version + bundle name
+        id: ver
+        run: |
+          base=$(python3 -c "import tomllib; print(tomllib.load(open('sdk/pyproject.toml','rb'))['project']['version'])")
+          version="v${base}-build.${{ github.run_number }}"
+          bundle_name="gdx-python-sdk-${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "bundle_name=${bundle_name}" >> "$GITHUB_OUTPUT"
+          echo "Building ${bundle_name}.zip"
+
+      - name: Build wheels-only zip via scripts/package.sh
+        run: bash scripts/package.sh ${{ steps.ver.outputs.bundle_name }}
+
+      - name: Recipient install + import smoke (clean venv)
+        run: |
+          mkdir -p /tmp/recip
+          unzip -q ${{ steps.ver.outputs.bundle_name }}.zip -d /tmp/recip
+          cd /tmp/recip/${{ steps.ver.outputs.bundle_name }}
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip --quiet
+          .venv/bin/pip install --quiet wheels/godark-*.whl
+          .venv/bin/python -c "from godark import GodarkClient, OrderType, Side, TimeInForce; print('imports OK')"
+          .venv/bin/python -m compileall -q examples
+
+      - name: Upload wheels-only zip as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ver.outputs.bundle_name }}
+          path: ${{ steps.ver.outputs.bundle_name }}.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  # --------------------------------------------------------------------------
+  # release: tag + GitHub release attached to the wheels-only zip.
+  # Only on push to main, after build passes.
+  # --------------------------------------------------------------------------
+  release:
+    name: Create GitHub release
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download wheels-only zip from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.bundle_name }}
+          path: ./release-asset
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.version }}
+          name: ${{ needs.build.outputs.version }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: ./release-asset/${{ needs.build.outputs.bundle_name }}.zip
+          body: |
+            **Automated release** built from commit `${{ github.sha }}`.
+
+            ## Install
+
+            1. Download `${{ needs.build.outputs.bundle_name }}.zip` from the
+               assets below.
+            2. Unzip and follow `README.md` inside the bundle:
+
+               ```bash
+               unzip ${{ needs.build.outputs.bundle_name }}.zip
+               cd ${{ needs.build.outputs.bundle_name }}
+               python3 -m venv .venv && source .venv/bin/activate
+               pip install --upgrade pip
+               pip install wheels/godark-*.whl
+               cp .env.example .env   # then fill in your testnet creds
+               python examples/quickstart.py
+               ```
+
+            See `README.md` and `SDK_REFERENCE.md` inside the bundle for the
+            full integration docs.

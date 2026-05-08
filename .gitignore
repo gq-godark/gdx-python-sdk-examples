@@ -1,0 +1,15 @@
+/.venv-pypy/
+/.venv/
+.env
+__pycache__/
+*.pyc
+*.egg-info/
+/build/
+/dist/
+/dist-wheels/
+/sdk/build/
+/sdk/*.egg-info/
+/sdk/dist-wheels/
+/wheels/
+*.tar.gz
+*.zip
