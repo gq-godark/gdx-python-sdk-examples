@@ -12,3 +12,4 @@ __pycache__/
 /sdk/dist-wheels/
 /wheels/
 *.tar.gz
+*.zip
