@@ -9,9 +9,16 @@ if [[ ! -x ".venv-pypy/bin/python" ]]; then
   exit 1
 fi
 
+if [[ -f ".env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source ".env"
+  set +a
+fi
+
 if [[ -z "${GODARK_API_KEY_ID:-}" || -z "${GODARK_API_SECRET:-}" ]]; then
   echo "Missing credentials."
-  echo "Export GODARK_API_KEY_ID and GODARK_API_SECRET in terminal first."
+  echo "Set GODARK_API_KEY_ID and GODARK_API_SECRET in .env (or export them in terminal)."
   exit 1
 fi
 

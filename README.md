@@ -4,8 +4,8 @@ Sample programs that consume the published `godark` package using a **PyPy**
 virtual environment. This mirrors the intent of `gdx-cpp-sdk-examples`: examples
 repo is independent from SDK source checkout.
 
-Credentials are read from **shell exports** (terminal environment variables),
-not from a `.env` file.
+Credentials can be loaded from a local `.env` file (recommended) or from shell
+environment variables.
 
 ## Prerequisites
 
@@ -68,15 +68,24 @@ GODARK_GIT_SPEC="git+https://github.com/gq-godark/gdx-python-sdk.git" bash scrip
 | `full_trader_example` | `examples/full_trader_example.py` | Expanded demo: callbacks, stream drain, place/modify/cancel. |
 | `full_trader_rest` | `examples/full_trader_rest.py` | REST client flow: encrypted place + fetch + cancel by id. |
 
+## Configure environment
+
+Copy the template and fill in your credentials:
+
+```bash
+cp .env.example .env
+```
+
+The `.env` file is gitignored. Keep `.env.example` checked in with safe placeholder values.
+
 ## Run
 
 ```bash
 source .venv-pypy/bin/activate
 
-export GODARK_API_KEY_ID="gdk_your_key_id"
-export GODARK_API_SECRET="your_secret"
-export GODARK_EDGE_URL="wss://api.godark-dex.com"
-export GDX_REST_URL="https://api.godark-dex.com/api/v1"
+set -a
+source .env
+set +a
 
 # 1) Auth + ECDH only
 python examples/e2e_trading_smoke.py --auth-only
@@ -90,14 +99,10 @@ python examples/market_data_example.py --symbol ETH-USDT-PERP
 
 ## Run all examples
 
-Set credentials in terminal, then run the helper script:
+The helper script auto-loads `.env` if present:
 
 ```bash
 source .venv-pypy/bin/activate
-export GODARK_API_KEY_ID="gdk_your_key_id"
-export GODARK_API_SECRET="your_secret"
-export GODARK_EDGE_URL="wss://api.godark-dex.com"
-export GDX_REST_URL="https://api.godark-dex.com/api/v1"
 bash scripts/run_all_examples.sh
 ```
 
@@ -124,6 +129,7 @@ The script runs:
 
 | Path | Purpose |
 |------|---------|
+| `.env.example` | Template for local runtime variables |
 | `scripts/setup_pypy.sh` | Creates PyPy venv and installs `godark` package |
 | `examples/common.py` | Shared env/config helpers |
 | `examples/*.py` | Runnable examples |
