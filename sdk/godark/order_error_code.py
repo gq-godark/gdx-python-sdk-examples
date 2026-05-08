@@ -1,4 +1,4 @@
-"""Canonical numeric order error codes (mirrors Rust `order_error_code.rs`)."""
+"""Canonical numeric order error codes (shared registry across GoDark SDKs)."""
 
 from __future__ import annotations
 

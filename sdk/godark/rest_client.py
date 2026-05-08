@@ -34,7 +34,7 @@ def _resolve_rest_base_url(explicit: str | None) -> str:
     ws = os.environ.get("GODARK_EDGE_URL", os.environ.get("GDX_EDGE_URL", "")).strip()
     if ws:
         return _ws_origin_to_http_rest(ws)
-    return "https://api.godarkdex.com"
+    return "https://api.godark-dex.com"
 
 
 def _ws_origin_to_http_rest(ws_url: str) -> str:
