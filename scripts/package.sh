@@ -19,13 +19,13 @@
 # intentionally NOT shipped.
 #
 # Usage:
-#   bash scripts/package.sh                              # default: gdx-python-sdk-examples-feat-v2.zip
+#   bash scripts/package.sh                              # default: godark-python-sdk.zip
 #   bash scripts/package.sh my-release                   # custom dist-name stem -> my-release.zip
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DIST_NAME="${1:-gdx-python-sdk-examples-feat-v2}"
+DIST_NAME="${1:-godark-python-sdk}"
 
 cd "$REPO_ROOT"
 
@@ -85,6 +85,10 @@ if echo "$LISTING" | grep -E "${DIST_NAME}/(sdk|scripts)/" >/dev/null; then
   echo "error: bundle contains sdk/ or scripts/ — wheels-only contract violated" >&2
   exit 1
 fi
+if echo "$LISTING" | grep -E "${DIST_NAME}/\\.env$" >/dev/null; then
+  echo "error: bundle contains .env — ship .env.example only" >&2
+  exit 1
+fi
 for required in \
   "${DIST_NAME}/wheels/godark-.*\\.whl" \
   "${DIST_NAME}/examples/quickstart\\.py" \
@@ -101,3 +105,14 @@ done
 
 echo
 echo "wheels-only assertion: PASSED"
+
+# Must NOT leak internal repo names or maintainer markers into the archive.
+if unzip -p "$ARCHIVE" 2>/dev/null | strings | grep -qiE \
+  'gdx-python-sdk|UPSTREAM_REF|refresh_sdk|package\.sh|\bvendored\b'; then
+  echo "error: bundle contains internal repo references or maintainer markers" >&2
+  unzip -p "$ARCHIVE" 2>/dev/null | strings | grep -iE \
+    'gdx-python-sdk|UPSTREAM_REF|refresh_sdk|package\.sh|\bvendored\b' | head -20 >&2 || true
+  exit 1
+fi
+
+echo "leak guard: PASSED"
