@@ -1,4 +1,4 @@
-"""Canonical numeric order error codes (mirrors Rust `order_error_code.rs`)."""
+"""Canonical numeric order error codes (shared registry across GoDark SDKs)."""
 
 from __future__ import annotations
 
@@ -35,7 +35,9 @@ ORDER_ERROR_CODES: tuple[OrderErrorEntry, ...] = (
     OrderErrorEntry(2006, "POSITION_UNDER_LIQUIDATION", "position is under active liquidation"),
     OrderErrorEntry(2007, "PRICE_DEVIATION_TOO_LARGE", "order price too far from oracle price"),
     OrderErrorEntry(2008, "LEVERAGE_EXCEEDS_MAX", "leverage exceeds instrument max"),
-    OrderErrorEntry(2009, "INSTRUMENT_HALTED", "instrument halted -- not currently accepting orders"),
+    OrderErrorEntry(
+        2009, "INSTRUMENT_HALTED", "instrument halted -- not currently accepting orders"
+    ),
     OrderErrorEntry(2010, "LIQUIDITY_POOL_WITHDRAW_COOLDOWN", "withdrawal cooldown active"),
     OrderErrorEntry(2011, "LIQUIDITY_POOL_PAUSED", "liquidity pool paused"),
     OrderErrorEntry(2012, "LIQUIDITY_POOL_ILLIQUID", "insufficient pool liquidity for withdrawal"),

@@ -183,6 +183,22 @@ class RestTransport:
         r.raise_for_status()
         return _unwrap(r.json())
 
+    async def get_auth_me(self, *, bearer: str) -> dict[str, Any]:
+        r = await self._client.get(
+            "/api/v1/auth/me",
+            headers={"Authorization": f"Bearer {bearer}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    async def get_shielded_pool_balances(self, *, bearer: str, owner: str) -> dict[str, Any]:
+        r = await self._client.get(
+            f"/api/v1/shielded-pool/balances/{owner}",
+            headers={"Authorization": f"Bearer {bearer}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
     async def revoke_token(self, *, bearer: str) -> dict[str, Any]:
         r = await self._client.post(
             "/api/v1/auth/token/revoke",

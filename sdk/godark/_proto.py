@@ -32,9 +32,9 @@ from .types import (  # noqa: E402
     MarginAlert,
     OrderUpdate,
     PositionRow,
-    PositionUpdate,
     PositionsSnapshot,
     PositionsSnapshotSource,
+    PositionUpdate,
     SettlementBatchStatus,
     SettlementUpdate,
     SystemHealthUpdate,
@@ -388,7 +388,9 @@ def parse_margin_alert_proto(msg: sequencer_pb2.MarginAlertMessage) -> MarginAle
     )
 
 
-def parse_funding_rate_update_proto(msg: sequencer_pb2.FundingRateUpdateMessage) -> FundingRateUpdate:
+def parse_funding_rate_update_proto(
+    msg: sequencer_pb2.FundingRateUpdateMessage,
+) -> FundingRateUpdate:
     return FundingRateUpdate(
         symbol_id=int(msg.symbol_id),
         current_rate=msg.current_rate,

@@ -17,7 +17,7 @@ from ._session import CryptoSession
 from ._symbols import load_default_symbol_map
 from .enums import OrderType, Side, TimeInForce
 from .errors import EncryptionError, OrderError, SessionError, TimeoutError
-from .types import OrderAck
+from .types import Balance, MeProfile, OrderAck
 
 _LOG = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ def _resolve_rest_base_url(explicit: str | None) -> str:
     ws = os.environ.get("GODARK_EDGE_URL", os.environ.get("GDX_EDGE_URL", "")).strip()
     if ws:
         return _ws_origin_to_http_rest(ws)
-    return "https://api.godarkdex.com"
+    return "https://api.godark-dex.com"
 
 
 def _ws_origin_to_http_rest(ws_url: str) -> str:
@@ -92,6 +92,7 @@ class GodarkRestClient:
         self._http = RestTransport(self._rest_base)
         self._bearer: str | None = None
         self._user_uuid: str | None = None
+        self._wallet_addr: str | None = None
         # Local routing index: client_order_id -> assigned order_id. Populated when this
         # SDK instance places an order with a client_order_id (after decrypting the ack).
         # Used by cancel_order_by_client_id to encrypt with the *real* order_id, since
@@ -137,7 +138,8 @@ class GodarkRestClient:
 
         # ECDH
         client_pk_b64 = self._session.generate_keypair()
-        assert self._bearer is not None
+        if not self._bearer:
+            raise SessionError("not authenticated – call connect() first")
         sess = await self._http.session_setup(bearer=self._bearer, client_ecdh_pubkey=client_pk_b64)
         seq_pk = sess.get("server_ecdh_pubkey") or sess.get("sequencer_ecdh_pubkey")
         sid = sess.get("session_id")
@@ -203,7 +205,8 @@ class GodarkRestClient:
         if client_order_id:
             payload["client_order_id"] = client_order_id
 
-        assert self._bearer is not None
+        if not self._bearer:
+            raise SessionError("not authenticated – call connect() first")
         raw = await self._http.post_encrypted_order(bearer=self._bearer, body=payload)
         return self._parse_ack(raw)
 
@@ -311,7 +314,8 @@ class GodarkRestClient:
         if client_order_id and ack.success and ack.order_id:
             self._local_coid_index[client_order_id] = str(ack.order_id)
             try:
-                assert self._bearer is not None
+                if not self._bearer:
+                    raise SessionError("not authenticated – call connect() first")
                 await self._http.register_client_order_mapping(
                     bearer=self._bearer,
                     client_order_id=client_order_id,
@@ -336,7 +340,8 @@ class GodarkRestClient:
             symbol_id=symbol_id,
             correlation_id_bytes=corr_id,
         )
-        assert self._bearer is not None
+        if not self._bearer:
+            raise SessionError("not authenticated – call connect() first")
         body_length = len(plaintext) + _GCM_TAG_LEN
         nonce_counter = self._session.next_nonce
         aad = _proto.build_order_header_aad(
@@ -379,7 +384,8 @@ class GodarkRestClient:
         """
         order_id = self._local_coid_index.get(client_order_id)
         if order_id is None:
-            assert self._bearer is not None
+            if not self._bearer:
+                raise SessionError("not authenticated – call connect() first")
             try:
                 row = await self._http.get_order_by_client_order_id(
                     bearer=self._bearer,
@@ -431,7 +437,8 @@ class GodarkRestClient:
             "body_length": body_length,
             "correlation_id": corr_id_str,
         }
-        assert self._bearer is not None
+        if not self._bearer:
+            raise SessionError("not authenticated – call connect() first")
         raw = await self._http.patch_encrypted_order(
             bearer=self._bearer,
             order_id=str(order_id),
@@ -440,11 +447,13 @@ class GodarkRestClient:
         return self._parse_ack(raw)
 
     async def get_order(self, order_id: str) -> dict[str, Any]:
-        assert self._bearer is not None
+        if not self._bearer:
+            raise SessionError("not authenticated – call connect() first")
         return await self._http.get_order(bearer=self._bearer, order_id=order_id)
 
     async def get_order_by_client_id(self, client_order_id: str) -> dict[str, Any]:
-        assert self._bearer is not None
+        if not self._bearer:
+            raise SessionError("not authenticated – call connect() first")
         return await self._http.get_order_by_client_order_id(
             bearer=self._bearer,
             client_order_id=client_order_id,
@@ -466,3 +475,53 @@ class GodarkRestClient:
                 return row
             await asyncio.sleep(poll_interval_sec)
         raise TimeoutError(f"order {order_id} did not reach terminal status within {timeout_sec}s")
+
+    # ------------------------------------------------------------------
+    # Identity & Balance
+    # ------------------------------------------------------------------
+
+    async def get_me(self) -> MeProfile:
+        """Fetch authenticated user profile from ``GET /api/v1/auth/me``."""
+        if not self._bearer:
+            raise SessionError("not authenticated – call connect() first")
+        data = await self._http.get_auth_me(bearer=self._bearer)
+        me = MeProfile(
+            id=data.get("id") or "",
+            dynamic_user_id=data.get("dynamic_user_id") or "",
+            email=data.get("email") or "",
+            wallet_address=data.get("wallet_address") or "",
+            referral_code=data.get("referral_code") or "",
+            tier=data.get("tier") or "",
+        )
+        if me.wallet_address and me.wallet_address != self._wallet_addr:
+            self._wallet_addr = me.wallet_address
+        return me
+
+    async def get_balance(self, owner: str) -> Balance:
+        """Fetch shielded-pool balance for ``owner`` (Solana base58 pubkey).
+
+        Calls ``GET /api/v1/shielded-pool/balances/{owner}``.
+        """
+        if not owner or not owner.strip():
+            raise ValueError(
+                "get_balance: owner pubkey is required (use get_my_balance to auto-resolve from /auth/me)"
+            )
+        if not self._bearer:
+            raise SessionError("not authenticated – call connect() first")
+        data = await self._http.get_shielded_pool_balances(bearer=self._bearer, owner=owner)
+        return Balance(
+            wallet_usdt_raw=int(data.get("walletUsdtRaw", 0)),
+            pending_deposits_raw=int(data.get("pendingDepositsRaw", 0)),
+            shielded_balance_raw=int(data.get("shieldedBalanceRaw", 0)),
+            wallet_usdt_ui=float(data.get("walletUsdtUi", 0.0)),
+        )
+
+    async def get_my_balance(self) -> Balance:
+        """Convenience: resolve wallet from ``/auth/me`` (cached) then fetch balance."""
+        owner = self._wallet_addr
+        if not owner:
+            me = await self.get_me()
+            if not me.wallet_address:
+                raise SessionError("get_my_balance: /auth/me returned empty wallet_address")
+            owner = me.wallet_address
+        return await self.get_balance(owner)

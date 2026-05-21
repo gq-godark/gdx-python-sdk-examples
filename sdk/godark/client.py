@@ -12,8 +12,6 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from typing import Any, TypeVar
 
-TStream = TypeVar("TStream")
-
 from . import _crypto, _identity, _proto  # noqa: F401 (_crypto registers protobuf codecs)
 from ._session import CryptoSession
 from ._symbols import load_default_symbol_map
@@ -34,12 +32,14 @@ from .types import (
     MarginAlert,
     OrderAck,
     OrderUpdate,
-    PositionUpdate,
     PositionsSnapshot,
+    PositionUpdate,
     SettlementUpdate,
     SystemHealthUpdate,
     UnknownSequencerPush,
 )
+
+TStream = TypeVar("TStream")
 
 logger = logging.getLogger("godark")
 
@@ -128,7 +128,7 @@ class GodarkClient:
         api_key_id: Key-pair public ID (use with ``api_secret``).
         api_secret: Key-pair secret (use with ``api_key_id``).
         base_url: Edge WebSocket origin (host only, e.g.
-            ``wss://api.godarkdex.com``). The client appends ``/ws/v1`` to
+            ``wss://api.godark-dex.com``). The client appends ``/ws/v1`` to
             produce the final upgrade URL. Defaults to production; override
             with arg or ``GODARK_EDGE_URL`` / ``GDX_EDGE_URL`` env vars.
         user_uuid: Fallback user UUID when the edge auth response omits it
