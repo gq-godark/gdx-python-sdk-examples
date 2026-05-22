@@ -141,6 +141,28 @@ class SettlementUpdate:
 
 
 @dataclass(frozen=True)
+class MeProfile:
+    """REST profile snapshot from ``GET /api/v1/auth/me``."""
+
+    id: str
+    dynamic_user_id: str
+    email: str
+    wallet_address: str
+    referral_code: str
+    tier: str
+
+
+@dataclass(frozen=True)
+class Balance:
+    """Shielded-pool balance snapshot from ``GET /api/v1/shielded-pool/balances/{owner}``."""
+
+    wallet_usdt_raw: int
+    pending_deposits_raw: int
+    shielded_balance_raw: int
+    wallet_usdt_ui: float
+
+
+@dataclass(frozen=True)
 class UnknownSequencerPush:
     """Decoded outer message with an inner variant this SDK revision does not map."""
 

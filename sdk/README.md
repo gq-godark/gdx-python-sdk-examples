@@ -1,10 +1,11 @@
-# godark (vendored)
+# GoDark Python SDK
 
-This is a vendored copy of the GoDark Python trading SDK for market-maker
-examples. Pre-generated protobuf modules live under `godark/_generated/`; you
-do **not** need `protoc`.
+Python SDK for encrypted trading on the GoDark DEX over WebSocket.
 
-Install into a virtualenv:
+Pre-generated protobuf modules live under `godark/_generated/`; you do **not**
+need `protoc`.
+
+Install:
 
 ```bash
 pip install .

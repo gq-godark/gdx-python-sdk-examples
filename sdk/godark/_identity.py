@@ -1,7 +1,7 @@
 """UUID conversion helpers between canonical string form and 16-byte big-endian.
 
 The wire format carries `bytes user_uuid` (RFC 4122, big-endian, 16 B) so it
-matches Rust's `Uuid::as_bytes()`. The public Python API exposes the canonical
+matches the wire encoding (big-endian 16-byte UUID). The public Python API exposes the canonical
 8-4-4-4-12 hex string because that's what users see in dashboards. Conversion
 happens at the wire boundary.
 """
@@ -19,7 +19,7 @@ it on the way to the sequencer. This matches gdx-web's PLACEHOLDER_USER_COMMITME
 
 
 def uuid_to_bytes(s: str) -> bytes:
-    """Canonical UUID string -> 16-byte big-endian (matches Rust ``Uuid::as_bytes()``)."""
+    """Canonical UUID string -> 16-byte big-endian wire encoding."""
     return uuid.UUID(s).bytes
 
 

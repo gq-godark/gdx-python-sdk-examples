@@ -25,22 +25,28 @@ from .market_data import MarketDataClient, subscription_callback_key
 from .order_error_code import (
     ORDER_ERROR_CODES,
     OrderErrorEntry,
-    find as find_order_error_code,
-    find_symbolic as find_order_error_symbolic,
     make_order_error_from_code,
     make_order_error_from_json,
 )
+from .order_error_code import (
+    find as find_order_error_code,
+)
+from .order_error_code import (
+    find_symbolic as find_order_error_symbolic,
+)
 from .rest_client import GodarkRestClient
 from .types import (
+    Balance,
     BalanceUpdate,
     FundingRateUpdate,
     MarginAlert,
+    MeProfile,
     OrderAck,
     OrderUpdate,
     PositionRow,
-    PositionUpdate,
     PositionsSnapshot,
     PositionsSnapshotSource,
+    PositionUpdate,
     SettlementBatchStatus,
     SettlementUpdate,
     SystemHealthUpdate,
@@ -62,6 +68,8 @@ __all__ = [
     "CancelReason",
     "PositionsSnapshotSource",
     "SettlementBatchStatus",
+    "Balance",
+    "MeProfile",
     "OrderAck",
     "OrderUpdate",
     "PositionRow",

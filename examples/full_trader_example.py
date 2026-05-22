@@ -17,6 +17,7 @@ from godark import (
     BalanceUpdate,
     FundingRateUpdate,
     GodarkClient,
+    GodarkRestClient,
     MarginAlert,
     OrderType,
     OrderUpdate,
@@ -54,6 +55,10 @@ async def main() -> int:
         or "wss://api.godark-dex.com"
     )
     print(f"Endpoint: {base_url}")
+
+    async with GodarkRestClient(api_key_id=api_key_id, api_secret=api_secret) as rest:
+        bal = await rest.get_my_balance()
+        print(f"Balance: shielded_raw={bal.shielded_balance_raw}", flush=True)
 
     transport = TransportConfig(
         additional_headers={"X-Trader-Tag": "python-full-trader-demo"},
@@ -179,7 +184,6 @@ async def main() -> int:
             print(f"  ({n} order update(s) {label})")
 
     print("Placing limit BUY @ 67500...")
-    buy_ack = None
     try:
         buy_ack = await client.place_order(
             SYMBOL,

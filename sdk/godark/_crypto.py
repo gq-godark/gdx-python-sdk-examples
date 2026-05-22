@@ -25,7 +25,7 @@ def derive_session_key(
     Derive a 32-byte AES session key from X25519 ECDH + HKDF-SHA256.
 
     HKDF salt = 64 bytes: min(local_pub, remote_pub) || max(local_pub, remote_pub)
-    (byte-lexicographic comparison, matching Rust gdx-crypto ecdh.rs)
+    (byte-lexicographic comparison, matching the reference ECDH wire encoding)
 
     HKDF info = b"gdx-e2e-session-key-v1"
     """
