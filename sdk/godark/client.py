@@ -77,6 +77,17 @@ def _resolve_user_uuid(explicit: str | None) -> str | None:
     return None
 
 
+def _resolve_passphrase(explicit: str | None) -> str | None:
+    """Resolve passphrase: constructor arg wins, then env vars."""
+    if explicit is not None and str(explicit).strip() != "":
+        return str(explicit).strip()
+    for key in ("GODARK_PASSPHRASE", "GDX_PASSPHRASE"):
+        v = os.environ.get(key, "").strip()
+        if v:
+            return v
+    return None
+
+
 def _ws_url(base_url: str) -> str:
     """Return the canonical WebSocket URL ending in ``/ws/v1``.
 
@@ -125,8 +136,10 @@ class GodarkClient:
 
     Parameters:
         api_key: Legacy single opaque API key.
-        api_key_id: Key-pair public ID (use with ``api_secret``).
-        api_secret: Key-pair secret (use with ``api_key_id``).
+        api_key_id: Key-pair public ID (use with ``api_secret`` and ``passphrase``).
+        api_secret: Key-pair secret (use with ``api_key_id`` and ``passphrase``).
+        passphrase: User-chosen API key passphrase (required with key pair; also reads
+            ``GODARK_PASSPHRASE`` / ``GDX_PASSPHRASE``).
         base_url: Edge WebSocket origin (host only, e.g.
             ``wss://api.godark-dex.com``). The client appends ``/ws/v1`` to
             produce the final upgrade URL. Defaults to production; override
@@ -140,7 +153,9 @@ class GodarkClient:
 
     Usage::
 
-        async with GodarkClient(api_key_id="gdk_…", api_secret="…") as client:
+        async with GodarkClient(
+            api_key_id="gdk_…", api_secret="…", passphrase="your-passphrase"
+        ) as client:
             ...
 
         # Local edge (no user_uuid in auth response):
@@ -162,6 +177,7 @@ class GodarkClient:
         *,
         api_key_id: str | None = None,
         api_secret: str | None = None,
+        passphrase: str | None = None,
         base_url: str | None = None,
         user_uuid: str | None = None,
         auto_reconnect: bool = True,
@@ -174,8 +190,13 @@ class GodarkClient:
                 raise ValueError("api_key_id and api_secret must be provided together")
             if api_key is not None:
                 raise ValueError("use either api_key or (api_key_id, api_secret), not both")
-            self._auth_token = f"{api_key_id}:{api_secret}"
+            resolved_passphrase = _resolve_passphrase(passphrase)
+            if resolved_passphrase is None:
+                raise ValueError("passphrase is required when using api_key_id and api_secret")
+            self._auth_token = f"{api_key_id}:{api_secret}:{resolved_passphrase}"
         elif api_key is not None:
+            if passphrase is not None and str(passphrase).strip() != "":
+                raise ValueError("passphrase must not be set when using legacy api_key")
             self._auth_token = api_key
         else:
             raise ValueError("provide api_key or both api_key_id and api_secret")

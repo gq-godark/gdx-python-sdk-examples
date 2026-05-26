@@ -15,9 +15,10 @@ from ._identity import bytes_to_uuid
 from ._rest_transport import RestEnvelopeError, RestTransport
 from ._session import CryptoSession
 from ._symbols import load_default_symbol_map
+from .client import _resolve_passphrase
 from .enums import OrderType, Side, TimeInForce
 from .errors import EncryptionError, OrderError, SessionError, TimeoutError
-from .types import Balance, MeProfile, OrderAck
+from .types import Balance, LeverageSetting, LeverageSettings, MeProfile, OrderAck
 
 _LOG = logging.getLogger(__name__)
 
@@ -72,6 +73,7 @@ class GodarkRestClient:
         *,
         api_key_id: str | None = None,
         api_secret: str | None = None,
+        passphrase: str | None = None,
         rest_base_url: str | None = None,
         symbol_map: dict[str, int] | None = None,
     ):
@@ -80,8 +82,19 @@ class GodarkRestClient:
                 raise ValueError("api_key_id and api_secret must be provided together")
             if api_key is not None:
                 raise ValueError("use either api_key or (api_key_id, api_secret), not both")
-            self._auth_token = f"{api_key_id}:{api_secret}"
+            resolved_passphrase = _resolve_passphrase(passphrase)
+            if resolved_passphrase is None:
+                raise ValueError("passphrase is required when using api_key_id and api_secret")
+            self._api_key_id = api_key_id
+            self._api_secret = api_secret
+            self._passphrase = resolved_passphrase
+            self._auth_token: str | None = None
         elif api_key is not None:
+            if passphrase is not None and str(passphrase).strip() != "":
+                raise ValueError("passphrase must not be set when using legacy api_key")
+            self._api_key_id = None
+            self._api_secret = None
+            self._passphrase = None
             self._auth_token = api_key
         else:
             raise ValueError("provide api_key or both api_key_id and api_secret")
@@ -120,13 +133,12 @@ class GodarkRestClient:
 
     async def connect(self) -> None:
         # JWT mint
-        if ":" in self._auth_token:
-            kid, sec = self._auth_token.split(":", 1)
+        if self._api_key_id is not None:
             auth_data = await self._http.auth_token(
                 grant_type="client_credentials",
-                client_id=kid,
-                client_secret=sec,
-                passphrase=os.environ.get("GDX_PASSPHRASE", ""),
+                client_id=self._api_key_id,
+                client_secret=self._api_secret,
+                passphrase=self._passphrase,
             )
         else:
             auth_data = await self._http.auth_token(token=self._auth_token)
@@ -525,3 +537,66 @@ class GodarkRestClient:
                 raise SessionError("get_my_balance: /auth/me returned empty wallet_address")
             owner = me.wallet_address
         return await self.get_balance(owner)
+
+    async def get_leverage(self) -> LeverageSettings:
+        """Fetch per-symbol leverage settings via ``GET /api/v1/leverage``."""
+        if not self._bearer:
+            raise SessionError("not authenticated – call connect() first")
+        raw = await self._http.get_leverage(bearer=self._bearer)
+        rows = raw.get("settings") or []
+        settings: list[LeverageSetting] = []
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                settings.append(
+                    LeverageSetting(
+                        symbol_id=int(row.get("symbol_id", 0)),
+                        leverage=int(row.get("leverage", 0)),
+                    )
+                )
+        return LeverageSettings(settings=tuple(settings))
+
+    async def update_leverage(self, symbol: str, leverage: int) -> OrderAck:
+        """Send encrypted leverage update via ``POST /api/v1/leverage``."""
+        symbol_id = self._resolve_symbol(symbol)
+        lev = max(1, int(leverage))
+        corr_id = _new_correlation_id()
+        plaintext = _proto.build_update_leverage_proto(
+            user_uuid=self._user_uuid_bytes(),
+            symbol_id=symbol_id,
+            leverage=lev,
+            correlation_id_bytes=corr_id,
+        )
+        body_length = len(plaintext) + _GCM_TAG_LEN
+        nonce_counter = self._session.next_nonce
+        aad = _proto.build_order_header_aad(
+            user_uuid=self._user_uuid_bytes(),
+            symbol_id=symbol_id,
+            request_type_str="update_leverage",
+            nonce=nonce_counter,
+            body_length=body_length,
+            correlation_id=corr_id,
+        )
+        try:
+            actual_nonce, ciphertext = self._session.encrypt_order(aad, plaintext)
+        except Exception as e:
+            raise EncryptionError(f"Failed to encrypt leverage update: {e}") from e
+
+        body_b64 = base64.b64encode(ciphertext).decode("ascii")
+        corr_id_str = bytes_to_uuid(corr_id) if len(corr_id) == 16 else ""
+        header_obj: dict[str, Any] = {
+            "symbol_id": symbol_id,
+            "request_type": "update_leverage",
+            "nonce": actual_nonce,
+            "body_length": body_length,
+            "correlation_id": corr_id_str,
+            "leverage": lev,
+        }
+        if not self._bearer:
+            raise SessionError("not authenticated – call connect() first")
+        raw = await self._http.post_encrypted_leverage(
+            bearer=self._bearer,
+            body={"header": header_obj, "ciphertext": body_b64},
+        )
+        return self._parse_ack(raw)
