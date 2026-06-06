@@ -163,6 +163,17 @@ class Balance:
 
 
 @dataclass(frozen=True)
+class LeverageSetting:
+    symbol_id: int
+    leverage: int
+
+
+@dataclass(frozen=True)
+class LeverageSettings:
+    settings: tuple[LeverageSetting, ...]
+
+
+@dataclass(frozen=True)
 class UnknownSequencerPush:
     """Decoded outer message with an inner variant this SDK revision does not map."""
 

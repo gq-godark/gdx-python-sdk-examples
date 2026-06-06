@@ -43,9 +43,11 @@ async def main() -> int:
 
     api_key_id = os.environ.get("GODARK_API_KEY_ID", "").strip()
     api_secret = os.environ.get("GODARK_API_SECRET", "").strip()
-    if not api_key_id or not api_secret:
+    passphrase = os.environ.get("GODARK_PASSPHRASE", "").strip()
+    if not api_key_id or not api_secret or not passphrase:
         print(
-            "Missing GODARK_API_KEY_ID / GODARK_API_SECRET (.env at repo root).",
+            "Missing GODARK_API_KEY_ID / GODARK_API_SECRET / GODARK_PASSPHRASE "
+            "(.env at repo root).",
             file=sys.stderr,
         )
         return 1
@@ -56,7 +58,9 @@ async def main() -> int:
     )
     print(f"Endpoint: {base_url}")
 
-    async with GodarkRestClient(api_key_id=api_key_id, api_secret=api_secret) as rest:
+    async with GodarkRestClient(
+        api_key_id=api_key_id, api_secret=api_secret, passphrase=passphrase
+    ) as rest:
         bal = await rest.get_my_balance()
         print(f"Balance: shielded_raw={bal.shielded_balance_raw}", flush=True)
 
@@ -78,6 +82,7 @@ async def main() -> int:
     client = GodarkClient(
         api_key_id=api_key_id,
         api_secret=api_secret,
+        passphrase=passphrase,
         base_url=base_url,
         transport=transport,
     )
