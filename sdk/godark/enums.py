@@ -149,6 +149,9 @@ _REQUEST_TYPE_TO_PROTO: dict[str, int] = {
     "modify": 3,
     "subscribe": 4,
     "signing": 5,
+    "get_open_orders": 6,
+    "get_order_history": 7,
+    "update_leverage": 8,
 }
 
 _RESPONSE_MESSAGE_TYPE_TO_PROTO: dict[str, int] = {

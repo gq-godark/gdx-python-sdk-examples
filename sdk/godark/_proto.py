@@ -150,6 +150,24 @@ def build_modify_order_proto(
     return req.SerializeToString()
 
 
+def build_update_leverage_proto(
+    user_uuid: bytes,
+    symbol_id: int,
+    leverage: int,
+    correlation_id_bytes: bytes = b"",
+) -> bytes:
+    """Build an UpdateLeverageRequest wrapped in EdgeSequencerRequest, return serialized bytes."""
+    lev = max(1, int(leverage))
+    update = sequencer_pb2.UpdateLeverageRequest(
+        user_uuid=user_uuid,
+        symbol_id=symbol_id,
+        leverage=lev,
+        correlation_id=correlation_id_bytes,
+    )
+    req = sequencer_pb2.EdgeSequencerRequest(update_leverage=update)
+    return req.SerializeToString()
+
+
 def build_order_header_aad(
     user_uuid: bytes,
     symbol_id: int,

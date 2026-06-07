@@ -18,10 +18,11 @@ async def main() -> int:
 
     api_key_id = os.environ.get("GODARK_API_KEY_ID", "").strip()
     api_secret = os.environ.get("GODARK_API_SECRET", "").strip()
-    if not api_key_id or not api_secret:
+    passphrase = os.environ.get("GODARK_PASSPHRASE", "").strip()
+    if not api_key_id or not api_secret or not passphrase:
         print(
-            "Missing credentials: set GODARK_API_KEY_ID and GODARK_API_SECRET "
-            "(e.g. in a .env file at the repo root).",
+            "Missing credentials: set GODARK_API_KEY_ID, GODARK_API_SECRET and "
+            "GODARK_PASSPHRASE (e.g. in a .env file at the repo root).",
             file=sys.stderr,
         )
         return 1
@@ -35,6 +36,7 @@ async def main() -> int:
         async with GodarkClient(
             api_key_id=api_key_id,
             api_secret=api_secret,
+            passphrase=passphrase,
             base_url=base_url,
         ) as client:
             user = client.user_uuid or ""

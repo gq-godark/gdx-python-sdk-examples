@@ -206,3 +206,22 @@ class RestTransport:
         )
         r.raise_for_status()
         return _unwrap(r.json())
+
+    async def get_leverage(self, *, bearer: str) -> dict[str, Any]:
+        r = await self._client.get(
+            "/api/v1/leverage",
+            headers={"Authorization": f"Bearer {bearer}"},
+        )
+        r.raise_for_status()
+        return _unwrap(r.json())
+
+    async def post_encrypted_leverage(
+        self, *, bearer: str, body: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        r = await self._client.post(
+            "/api/v1/leverage",
+            json=dict(body),
+            headers={"Authorization": f"Bearer {bearer}"},
+        )
+        r.raise_for_status()
+        return _unwrap(r.json())
