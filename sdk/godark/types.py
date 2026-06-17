@@ -16,6 +16,65 @@ class OrderAck:
 
 
 @dataclass(frozen=True)
+class MassQuoteLegResult:
+    """Outcome of one cancel-replace leg in a mass-quote batch."""
+
+    leg_index: int
+    status: str  # "open" | "filled" | "failed" | "unspecified"
+    cancelled_order_id: str | None = None
+    new_order_id: str | None = None
+    error_code: int | None = None
+    # Number of taker fills produced by this leg in relaxed (post_only=False)
+    # mode; 0 for a pure rest or a post-only leg.
+    fill_count: int = 0
+
+
+@dataclass(frozen=True)
+class MassQuoteAck:
+    """Batch-level result of a mass quote: one entry per submitted leg."""
+
+    success: bool
+    sequence: str
+    results: list[MassQuoteLegResult]
+
+
+@dataclass(frozen=True)
+class BatchCancelLegResult:
+    """Outcome of cancelling one order id in a batch-cancel request."""
+
+    order_id: str
+    cancelled: bool
+    error_code: int | None = None
+
+
+@dataclass(frozen=True)
+class BatchCancelAck:
+    """Batch-level result of a batch cancel: one entry per submitted order id."""
+
+    success: bool
+    sequence: str
+    results: list[BatchCancelLegResult]
+
+
+@dataclass(frozen=True)
+class BatchModifyLegResult:
+    """Outcome of amending one resting order in a batch-modify request."""
+
+    order_id: str
+    modified: bool
+    error_code: int | None = None
+
+
+@dataclass(frozen=True)
+class BatchModifyAck:
+    """Batch-level result of a batch modify: one entry per submitted leg."""
+
+    success: bool
+    sequence: str
+    results: list[BatchModifyLegResult]
+
+
+@dataclass(frozen=True)
 class OrderUpdate:
     order_id: str
     user_uuid: str

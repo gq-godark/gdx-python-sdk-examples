@@ -28,8 +28,14 @@ from .errors import (
 from .order_error_code import make_order_error_from_code, make_order_error_from_json
 from .types import (
     BalanceUpdate,
+    BatchCancelAck,
+    BatchCancelLegResult,
+    BatchModifyAck,
+    BatchModifyLegResult,
     FundingRateUpdate,
     MarginAlert,
+    MassQuoteAck,
+    MassQuoteLegResult,
     OrderAck,
     OrderUpdate,
     PositionsSnapshot,
@@ -45,6 +51,15 @@ logger = logging.getLogger("godark")
 
 _GCM_TAG_LEN = 16
 _REQUEST_TYPE_MAP = {"place": "place", "cancel": "cancel", "modify": "modify"}
+
+# Encrypted command request_type -> the ack message_type it resolves on. Batched
+# commands get their own ack type so an async order "ack" pushed mid-flight does
+# not resolve them early; everything else falls back to the generic "ack".
+_INFLIGHT_ACK_TYPE = {
+    "mass_quote": "mass_quote_ack",
+    "batch_cancel": "batch_cancel_ack",
+    "batch_modify": "batch_modify_ack",
+}
 
 # Production WebSocket origin (GodarkClient appends `/ws/v1`).
 _DEFAULT_EDGE_BASE_URL = "wss://api.godark-dex.com"
@@ -218,6 +233,10 @@ class GodarkClient:
         self._token_expires_at: str | None = None
         self._cancel_on_disconnect = False
         self._connected = False
+        # The ack message_type the currently in-flight encrypted command waits
+        # for (set by _send_encrypted_command); guards batch acks from being
+        # resolved early by an unrelated async "ack" push.
+        self._inflight_response_type: str | None = None
 
         self._desired_channels: set[str] = set()
         self._order_queue: asyncio.Queue[OrderUpdate] = asyncio.Queue(maxsize=stream_buffer_size)
@@ -437,6 +456,107 @@ class GodarkClient:
 
         return await self._send_encrypted_order("modify", symbol_id, plaintext, corr_id)
 
+    async def mass_quote(
+        self,
+        symbol: str,
+        legs: list[dict],
+        leverage: int = 1,
+        post_only: bool | None = None,
+    ) -> MassQuoteAck:
+        """Bulk cancel-replace (market-maker mass quote).
+
+        Each ``leg`` is a dict with: ``side`` ("BUY"/"SELL" or :class:`Side`),
+        ``price`` (float), ``quantity`` (float), optional ``cancel_order_id``
+        (int; omit/0 = pure place), ``time_in_force`` ("GTC"/"GTD", default GTC),
+        ``expiry_time`` (ns, GTD only). Up to 20 legs per batch, single symbol.
+
+        ``post_only`` controls the batch matching mode. Left as ``None`` (the
+        default) every replacement is post-only: a leg that would cross is
+        rejected as ``failed``, which lets the whole batch fuse into one MPC
+        round. Pass ``post_only=False`` for the relaxed path, where a crossing
+        leg instead takes liquidity up to its limit and rests the remainder; the
+        number of taker fills is reported per leg as ``fill_count``. Both modes
+        keep online MPC rounds flat in the number of legs.
+
+        Returns a :class:`MassQuoteAck` with one result per leg.
+        """
+        self._ensure_ready()
+        symbol_id = self._resolve_symbol(symbol)
+        corr_id = _new_correlation_id()
+
+        plaintext = _proto.build_mass_quote_proto(
+            symbol_id=symbol_id,
+            user_uuid=self._user_uuid_bytes(),
+            legs=legs,
+            correlation_id_bytes=corr_id,
+            leverage=leverage,
+            post_only=post_only,
+        )
+        response = await self._send_encrypted_command(
+            "mass_quote", "order.mass_quote", symbol_id, plaintext, corr_id
+        )
+        return self._parse_mass_quote_response(response)
+
+    async def batch_cancel(
+        self,
+        symbol: str,
+        order_ids: list[int],
+    ) -> BatchCancelAck:
+        """Cancel multiple resting orders in a single fanned-out request.
+
+        ``order_ids`` is a list of resting order ids on one ``symbol`` (up to 20
+        per batch). Cancels are pure index removals (no MPC comparison), so the
+        whole batch costs zero online rounds regardless of count. Returns a
+        :class:`BatchCancelAck` with one result per id, in input order; an id
+        that is not resting is reported as ``cancelled=False`` (error_code 2003)
+        and never aborts the rest of the batch.
+        """
+        self._ensure_ready()
+        symbol_id = self._resolve_symbol(symbol)
+        corr_id = _new_correlation_id()
+
+        plaintext = _proto.build_batch_cancel_proto(
+            symbol_id=symbol_id,
+            user_uuid=self._user_uuid_bytes(),
+            order_ids=order_ids,
+            correlation_id_bytes=corr_id,
+        )
+        response = await self._send_encrypted_command(
+            "batch_cancel", "order.batch_cancel", symbol_id, plaintext, corr_id
+        )
+        return self._parse_batch_cancel_response(response)
+
+    async def batch_modify(
+        self,
+        symbol: str,
+        legs: list[dict],
+    ) -> BatchModifyAck:
+        """Amend multiple resting orders in a single fanned-out post-only request.
+
+        ``legs`` is a list of dicts on one ``symbol`` (up to 20 per batch); each
+        leg supports ``order_id`` (int, required), ``new_price`` (float|None) and
+        ``new_quantity`` (float|None) — at least one of the two must be set.
+        Amends are post-only: a leg whose amended order would cross is rejected
+        (``modified=False``, error_code 2018) rather than taking liquidity, and a
+        missing order id is reported ``modified=False`` (error_code 2003); neither
+        aborts the rest of the batch. Returns a :class:`BatchModifyAck` with one
+        result per leg, in input order.
+        """
+        self._ensure_ready()
+        symbol_id = self._resolve_symbol(symbol)
+        corr_id = _new_correlation_id()
+
+        plaintext = _proto.build_batch_modify_proto(
+            symbol_id=symbol_id,
+            user_uuid=self._user_uuid_bytes(),
+            legs=legs,
+            correlation_id_bytes=corr_id,
+        )
+        response = await self._send_encrypted_command(
+            "batch_modify", "order.batch_modify", symbol_id, plaintext, corr_id
+        )
+        return self._parse_batch_modify_response(response)
+
     # ------------------------------------------------------------------
     # Subscriptions & streaming
     # ------------------------------------------------------------------
@@ -632,6 +752,26 @@ class GodarkClient:
         Concurrent calls to ``place_order`` / ``cancel_order`` / ``modify_order``
         will wait on the same transport lock; do not expect parallel acks.
         """
+        op_map = {"place": "order.place", "cancel": "order.cancel", "modify": "order.modify"}
+        response = await self._send_encrypted_command(
+            request_type, op_map[request_type], symbol_id, plaintext, correlation_id
+        )
+        return self._parse_order_response(response)
+
+    async def _send_encrypted_command(
+        self,
+        request_type: str,
+        docs_op: str,
+        symbol_id: int,
+        plaintext: bytes,
+        correlation_id: bytes = b"",
+    ) -> dict:
+        """Encrypt one edge command and await its raw transport response.
+
+        Shared by order place/cancel/modify, mass quote and batch cancel/modify.
+        ``request_type`` sets the encrypted ``OrderHeader`` request type (also used
+        as AES-GCM AAD); ``docs_op`` is the WS docs op string in docs-wire mode.
+        """
         body_length = len(plaintext) + _GCM_TAG_LEN
         nonce_counter = self._session.next_nonce
 
@@ -659,10 +799,9 @@ class GodarkClient:
             "correlation_id": corr_id_str,
         }
         if self._transport.use_docs_wire:
-            op_map = {"place": "order.place", "cancel": "order.cancel", "modify": "order.modify"}
             payload = {
                 "id": str(uuid.uuid4()),
-                "op": op_map[request_type],
+                "op": docs_op,
                 "args": {"header": header_obj, "ciphertext": body_b64},
             }
         else:
@@ -674,8 +813,11 @@ class GodarkClient:
                 },
             }
 
-        response = await self._transport.send_command(payload)
-        return self._parse_order_response(response)
+        self._inflight_response_type = _INFLIGHT_ACK_TYPE.get(request_type, "ack")
+        try:
+            return await self._transport.send_command(payload)
+        finally:
+            self._inflight_response_type = None
 
     def _parse_order_response(self, msg: dict) -> OrderAck:
         msg_type = msg.get("type")
@@ -703,6 +845,131 @@ class GodarkClient:
             return self._decrypt_ack_push(msg)
 
         raise OrderError(f"Unexpected response type: {msg_type}")
+
+    def _parse_mass_quote_response(self, msg: dict) -> MassQuoteAck:
+        msg_type = msg.get("type")
+        if msg_type == "error":
+            raise OrderError(msg.get("message", "unknown error"))
+        if msg_type != "encrypted_push":
+            raise OrderError(f"Unexpected mass quote response type: {msg_type}")
+
+        ct = base64.b64decode(msg.get("encrypted_body", ""))
+        nonce = msg.get("nonce", 0)
+        aad = _proto.build_response_header_aad(
+            user_uuid=self._user_uuid_bytes(),
+            message_type_str=msg.get("message_type", "mass_quote_ack"),
+            body_length=len(ct),
+            nonce=nonce,
+            fencing_epoch=msg.get("fencing_epoch", 0),
+        )
+        try:
+            plaintext = self._session.decrypt_push(nonce, aad, ct)
+        except Exception as e:
+            raise EncryptionError(f"Failed to decrypt mass quote ack: {e}") from e
+
+        parsed = _proto.parse_mass_quote_ack(plaintext)
+        if parsed.get("type") != "mass_quote_ack":
+            raise OrderError(f"Expected mass_quote_ack, got {parsed.get('type')}")
+
+        results = [
+            MassQuoteLegResult(
+                leg_index=r["leg_index"],
+                status=r["status"],
+                cancelled_order_id=(
+                    str(r["cancelled_order_id"]) if r["cancelled_order_id"] else None
+                ),
+                new_order_id=str(r["new_order_id"]) if r["new_order_id"] else None,
+                error_code=r["error_code"],
+                fill_count=r.get("fill_count", 0),
+            )
+            for r in parsed.get("results", [])
+        ]
+        success = all(r.status != "failed" for r in results)
+        return MassQuoteAck(
+            success=success,
+            sequence=str(parsed.get("sequence", "")),
+            results=results,
+        )
+
+    def _parse_batch_cancel_response(self, msg: dict) -> BatchCancelAck:
+        msg_type = msg.get("type")
+        if msg_type == "error":
+            raise OrderError(msg.get("message", "unknown error"))
+        if msg_type != "encrypted_push":
+            raise OrderError(f"Unexpected batch cancel response type: {msg_type}")
+
+        ct = base64.b64decode(msg.get("encrypted_body", ""))
+        nonce = msg.get("nonce", 0)
+        aad = _proto.build_response_header_aad(
+            user_uuid=self._user_uuid_bytes(),
+            message_type_str=msg.get("message_type", "batch_cancel_ack"),
+            body_length=len(ct),
+            nonce=nonce,
+            fencing_epoch=msg.get("fencing_epoch", 0),
+        )
+        try:
+            plaintext = self._session.decrypt_push(nonce, aad, ct)
+        except Exception as e:
+            raise EncryptionError(f"Failed to decrypt batch cancel ack: {e}") from e
+
+        parsed = _proto.parse_batch_cancel_ack(plaintext)
+        if parsed.get("type") != "batch_cancel_ack":
+            raise OrderError(f"Expected batch_cancel_ack, got {parsed.get('type')}")
+
+        results = [
+            BatchCancelLegResult(
+                order_id=str(r["order_id"]),
+                cancelled=r["cancelled"],
+                error_code=r["error_code"],
+            )
+            for r in parsed.get("results", [])
+        ]
+        success = all(r.cancelled for r in results)
+        return BatchCancelAck(
+            success=success,
+            sequence=str(parsed.get("sequence", "")),
+            results=results,
+        )
+
+    def _parse_batch_modify_response(self, msg: dict) -> BatchModifyAck:
+        msg_type = msg.get("type")
+        if msg_type == "error":
+            raise OrderError(msg.get("message", "unknown error"))
+        if msg_type != "encrypted_push":
+            raise OrderError(f"Unexpected batch modify response type: {msg_type}")
+
+        ct = base64.b64decode(msg.get("encrypted_body", ""))
+        nonce = msg.get("nonce", 0)
+        aad = _proto.build_response_header_aad(
+            user_uuid=self._user_uuid_bytes(),
+            message_type_str=msg.get("message_type", "batch_modify_ack"),
+            body_length=len(ct),
+            nonce=nonce,
+            fencing_epoch=msg.get("fencing_epoch", 0),
+        )
+        try:
+            plaintext = self._session.decrypt_push(nonce, aad, ct)
+        except Exception as e:
+            raise EncryptionError(f"Failed to decrypt batch modify ack: {e}") from e
+
+        parsed = _proto.parse_batch_modify_ack(plaintext)
+        if parsed.get("type") != "batch_modify_ack":
+            raise OrderError(f"Expected batch_modify_ack, got {parsed.get('type')}")
+
+        results = [
+            BatchModifyLegResult(
+                order_id=str(r["order_id"]),
+                modified=r["modified"],
+                error_code=r["error_code"],
+            )
+            for r in parsed.get("results", [])
+        ]
+        success = all(r.modified for r in results)
+        return BatchModifyAck(
+            success=success,
+            sequence=str(parsed.get("sequence", "")),
+            results=results,
+        )
 
     def _decrypt_ack_push(self, msg: dict) -> OrderAck:
         ct_b64 = msg.get("encrypted_body", "")
@@ -758,8 +1025,15 @@ class GodarkClient:
         message_type = msg.get("message_type", "")
         fencing_epoch = msg.get("fencing_epoch", 0)
 
-        if message_type == "ack":
-            self._transport.resolve_command(msg)
+        if message_type in ("ack", "mass_quote_ack", "batch_cancel_ack", "batch_modify_ack"):
+            # Only resolve the in-flight command if this ack is the kind it is
+            # waiting for. A mass_quote awaits "mass_quote_ack"; an async order
+            # "ack" pushed while it is in flight must not resolve it early
+            # (that surfaced as "Expected mass_quote_ack, got ack"). When no
+            # expected type is recorded, fall back to legacy resolve-any.
+            expected = self._inflight_response_type
+            if expected is None or message_type == expected:
+                self._transport.resolve_command(msg)
             return
 
         # Skip push types we don't have an AAD enum value for. The server

@@ -94,16 +94,25 @@ def _normalize_inbound_message(msg: dict[str, Any]) -> dict[str, Any]:
             return {"type": "error", "message": err_text or "logout failed"}
         return {"type": "ack", "success": True}
 
-    if op in ("order.place", "order.cancel", "order.modify"):
+    if op in (
+        "order.place",
+        "order.cancel",
+        "order.modify",
+        "order.mass_quote",
+        "order.batch_cancel",
+        "order.batch_modify",
+    ):
         if code != 0:
             return {"type": "error", "message": err_text or "order error"}
         if not isinstance(data, dict):
             return {"type": "error", "message": "invalid order response"}
-        if data.get("message_type") == "ack":
+        # Encrypted acks (single-order "ack" or batch "*_ack") come back as a
+        # ciphertext frame the client decrypts; surface them as a push.
+        if data.get("message_type") and ("ciphertext" in data or "encrypted_body" in data):
             ciphertext = data.get("ciphertext", data.get("encrypted_body", ""))
             return {
                 "type": "encrypted_push",
-                "message_type": "ack",
+                "message_type": data.get("message_type"),
                 "encrypted_body": ciphertext,
                 "nonce": data.get("nonce", 0),
                 "fencing_epoch": data.get("fencing_epoch", 0),

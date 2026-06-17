@@ -243,6 +243,50 @@ async def main() -> int:
     await asyncio.sleep(1)
     drain_orders("after SELL/CANCEL")
 
+    # --- Bulk quote (mass quote) -------------------------------------------
+    # Place a whole ladder of resting quotes in a single batched request. With
+    # the default (post_only) mode every leg is post-only: a leg that would
+    # cross is rejected as "failed" so the batch fuses into one MPC round. Pass
+    # post_only=False for the relaxed path, where a crossing leg takes liquidity
+    # up to its limit and rests the remainder (reported per leg as fill_count).
+    print("Mass-quoting a 3-level BUY ladder (post-only)...")
+    ladder = [
+        {"side": Side.BUY, "price": 66_000.0, "quantity": 0.02},
+        {"side": Side.BUY, "price": 65_500.0, "quantity": 0.02},
+        {"side": Side.BUY, "price": 65_000.0, "quantity": 0.02},
+    ]
+    resting_ids: list[int] = []
+    try:
+        mq = await client.mass_quote(SYMBOL, ladder, leverage=1)
+        print(f"Mass quote: success={mq.success} sequence={mq.sequence} legs={len(mq.results)}")
+        for r in mq.results:
+            print(
+                f"  leg {r.leg_index}: status={r.status} new_order_id={r.new_order_id} "
+                f"fills={r.fill_count} err={r.error_code}",
+                flush=True,
+            )
+            if r.status == "open" and r.new_order_id:
+                resting_ids.append(int(r.new_order_id))
+    except Exception as e:
+        print_order_error("Mass quote rejected", e)
+
+    await asyncio.sleep(1)
+    drain_orders("after MASS QUOTE")
+
+    if resting_ids:
+        print(f"Batch-cancelling {len(resting_ids)} ladder orders (cleanup)...")
+        try:
+            bc = await client.batch_cancel(SYMBOL, resting_ids)
+            for r in bc.results:
+                print(
+                    f"  cancel id={r.order_id}: cancelled={r.cancelled} err={r.error_code}",
+                    flush=True,
+                )
+        except Exception as e:
+            print_order_error("Batch cancel rejected", e)
+        await asyncio.sleep(0.5)
+        drain_orders("after BATCH CANCEL")
+
     print("Cancelling original BUY (cleanup)...")
     try:
         await client.cancel_order(str(buy_ack.order_id), SYMBOL)

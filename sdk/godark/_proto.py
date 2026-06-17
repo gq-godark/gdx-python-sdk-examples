@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import uuid
 from typing import Any, TypeAlias
 
 _GENERATED_DIR = os.path.join(os.path.dirname(__file__), "_generated")
@@ -168,6 +169,124 @@ def build_update_leverage_proto(
     return req.SerializeToString()
 
 
+def build_mass_quote_proto(
+    symbol_id: int,
+    user_uuid: bytes,
+    legs: list[dict[str, Any]],
+    correlation_id_bytes: bytes | None = None,
+    leverage: int = 1,
+    post_only: bool | None = None,
+) -> bytes:
+    """Build a MassQuoteInput wrapped in EdgeSequencerRequest, return serialized bytes.
+
+    Each leg dict supports: ``side`` (str/Side), ``price`` (float), ``quantity``
+    (float), ``cancel_order_id`` (int|None, 0/None = pure place), ``time_in_force``
+    (str, default GTC), ``expiry_time`` (int|None), ``correlation_id`` (bytes|None).
+
+    ``post_only`` is the batch-level flag: ``None`` omits it (node defaults to
+    post-only); ``False`` enables the relaxed path where a crossing leg takes
+    liquidity up to its limit and rests the remainder.
+    """
+    mq = sequencer_pb2.MassQuoteInput(
+        symbol_id=symbol_id,
+        user_commitment=b"",
+        user_uuid=user_uuid,
+        leverage=leverage,
+    )
+    if correlation_id_bytes is not None:
+        mq.correlation_id = correlation_id_bytes
+    if post_only is not None:
+        mq.post_only = post_only
+
+    for leg in legs:
+        side = leg["side"]
+        tif = leg.get("time_in_force", "GTC")
+        pb_leg = mq.legs.add()
+        pb_leg.side = _SIDE_TO_PROTO[side if isinstance(side, str) else side.value]
+        pb_leg.price = float(leg["price"])
+        pb_leg.quantity = float(leg["quantity"])
+        pb_leg.time_in_force = _TIME_IN_FORCE_TO_PROTO[
+            tif if isinstance(tif, str) else tif.value
+        ]
+        cancel_id = leg.get("cancel_order_id")
+        # cancel_order_id is plain uint64; 0 means "pure place" (no cancel target).
+        pb_leg.cancel_order_id = int(cancel_id) if cancel_id else 0
+        if leg.get("expiry_time") is not None:
+            pb_leg.expiry_time = int(leg["expiry_time"])
+        # Each leg becomes its own order, so it carries a unique 16-byte
+        # correlation_id (the wire requires exactly 16 bytes per leg). Callers
+        # may supply one explicitly; otherwise generate a fresh one.
+        leg_cid = leg.get("correlation_id")
+        pb_leg.correlation_id = leg_cid if leg_cid else uuid.uuid4().bytes
+
+    req = sequencer_pb2.EdgeSequencerRequest(mass_quote=mq)
+    return req.SerializeToString()
+
+
+def build_batch_cancel_proto(
+    symbol_id: int,
+    user_uuid: bytes,
+    order_ids: list[int],
+    correlation_id_bytes: bytes | None = None,
+) -> bytes:
+    """Build a BatchCancelInput wrapped in EdgeSequencerRequest, return serialized bytes.
+
+    ``order_ids`` is a list of resting order ids (plain uint64) to cancel in one
+    fanned-out batch. Up to 20 ids per request, single symbol. Cancels are pure
+    index removals (no MPC comparison), so the whole batch costs zero online rounds.
+    """
+    bc = sequencer_pb2.BatchCancelInput(
+        symbol_id=symbol_id,
+        user_commitment=b"",
+        user_uuid=user_uuid,
+        order_ids=[int(oid) for oid in order_ids],
+    )
+    if correlation_id_bytes is not None:
+        bc.correlation_id = correlation_id_bytes
+
+    req = sequencer_pb2.EdgeSequencerRequest(batch_cancel=bc)
+    return req.SerializeToString()
+
+
+def build_batch_modify_proto(
+    symbol_id: int,
+    user_uuid: bytes,
+    legs: list[dict[str, Any]],
+    correlation_id_bytes: bytes | None = None,
+) -> bytes:
+    """Build a BatchModifyInput wrapped in EdgeSequencerRequest, return serialized bytes.
+
+    Each leg dict supports: ``order_id`` (int, the resting order to amend),
+    ``new_price`` (float|None) and ``new_quantity`` (float|None) — at least one
+    must be set — and an optional ``correlation_id`` (bytes). Up to 20 legs per
+    request, single symbol. Amends are post-only: a leg whose amended order would
+    cross is rejected rather than taking liquidity, keeping the batch ~constant
+    online MPC rounds.
+    """
+    bm = sequencer_pb2.BatchModifyInput(
+        symbol_id=symbol_id,
+        user_commitment=b"",
+        user_uuid=user_uuid,
+    )
+    if correlation_id_bytes is not None:
+        bm.correlation_id = correlation_id_bytes
+
+    for leg in legs:
+        pb_leg = bm.legs.add()
+        pb_leg.order_id = int(leg["order_id"])
+        if leg.get("new_price") is not None:
+            pb_leg.new_price = float(leg["new_price"])
+        if leg.get("new_quantity") is not None:
+            pb_leg.new_quantity = float(leg["new_quantity"])
+        # Each leg carries a unique 16-byte correlation_id (wire requires exactly
+        # 16 bytes per leg). Callers may supply one; otherwise generate a fresh one.
+        leg_cid = leg.get("correlation_id")
+        pb_leg.correlation_id = leg_cid if leg_cid else uuid.uuid4().bytes
+
+    req = sequencer_pb2.EdgeSequencerRequest(batch_modify=bm)
+    return req.SerializeToString()
+
+
 def build_order_header_aad(
     user_uuid: bytes,
     symbol_id: int,
@@ -250,6 +369,116 @@ def parse_node_response(data: bytes) -> dict[str, Any]:
         return {"type": "signing"}
     else:
         return {"type": "unknown"}
+
+
+_MASS_QUOTE_LEG_STATUS_FROM_PROTO: dict[int, str] = {
+    0: "unspecified",
+    1: "open",
+    2: "filled",
+    3: "failed",
+}
+
+
+def parse_mass_quote_ack(data: bytes) -> dict[str, Any]:
+    """Decode a NodeResponse carrying a MassQuoteAck into a plain dict.
+
+    Returns ``{"type": "mass_quote_ack", "sequence", "correlation_id",
+    "results": [{"leg_index", "cancelled_order_id", "new_order_id", "status",
+    "error_code", "fill_count"}]}``. ``cancelled_order_id`` / ``new_order_id``
+    are ``None`` when zero (no cancel target / replacement failed).
+    ``fill_count`` is the number of taker fills the leg produced in relaxed
+    (post_only=False) mode; 0 for a pure rest or a post-only leg.
+    """
+    resp = sequencer_pb2.NodeResponse()
+    resp.ParseFromString(data)
+    which = resp.WhichOneof("inner")
+    if which != "mass_quote_ack":
+        return {"type": which or "unknown"}
+
+    a = resp.mass_quote_ack
+    results: list[dict[str, Any]] = []
+    for r in a.results:
+        results.append(
+            {
+                "leg_index": r.leg_index,
+                "cancelled_order_id": r.cancelled_order_id or None,
+                "new_order_id": r.new_order_id or None,
+                "status": _MASS_QUOTE_LEG_STATUS_FROM_PROTO.get(r.status, "unknown"),
+                "error_code": r.error_code if r.HasField("error_code") else None,
+                "fill_count": r.fill_count,
+            }
+        )
+    return {
+        "type": "mass_quote_ack",
+        "node_id": a.node_id,
+        "sequence": a.sequence,
+        "correlation_id": a.correlation_id,
+        "results": results,
+    }
+
+
+def parse_batch_cancel_ack(data: bytes) -> dict[str, Any]:
+    """Decode a NodeResponse carrying a BatchCancelAck into a plain dict.
+
+    Returns ``{"type": "batch_cancel_ack", "node_id", "sequence", "correlation_id",
+    "results": [{"order_id", "cancelled", "error_code"}]}``. ``error_code`` is
+    ``None`` for a successful cancel and set (e.g. 2003 ORDER_NOT_FOUND) otherwise.
+    """
+    resp = sequencer_pb2.NodeResponse()
+    resp.ParseFromString(data)
+    which = resp.WhichOneof("inner")
+    if which != "batch_cancel_ack":
+        return {"type": which or "unknown"}
+
+    a = resp.batch_cancel_ack
+    results: list[dict[str, Any]] = []
+    for r in a.results:
+        results.append(
+            {
+                "order_id": r.order_id,
+                "cancelled": r.cancelled,
+                "error_code": r.error_code if r.HasField("error_code") else None,
+            }
+        )
+    return {
+        "type": "batch_cancel_ack",
+        "node_id": a.node_id,
+        "sequence": a.sequence,
+        "correlation_id": a.correlation_id,
+        "results": results,
+    }
+
+
+def parse_batch_modify_ack(data: bytes) -> dict[str, Any]:
+    """Decode a NodeResponse carrying a BatchModifyAck into a plain dict.
+
+    Returns ``{"type": "batch_modify_ack", "node_id", "sequence", "correlation_id",
+    "results": [{"order_id", "modified", "error_code"}]}``. ``error_code`` is
+    ``None`` for a successful amend and set otherwise (2003 not-found, 2018 crossed).
+    """
+    resp = sequencer_pb2.NodeResponse()
+    resp.ParseFromString(data)
+    which = resp.WhichOneof("inner")
+    if which != "batch_modify_ack":
+        return {"type": which or "unknown"}
+
+    a = resp.batch_modify_ack
+    results: list[dict[str, Any]] = []
+    for r in a.results:
+        results.append(
+            {
+                "order_id": r.order_id,
+                "modified": r.modified,
+                "error_code": r.error_code if r.HasField("error_code") else None,
+            }
+        )
+    return {
+        "type": "batch_modify_ack",
+        "node_id": a.node_id,
+        "sequence": a.sequence,
+        "correlation_id": a.correlation_id,
+        "results": results,
+    }
 
 
 def parse_order_update_proto(data: bytes) -> OrderUpdate:
