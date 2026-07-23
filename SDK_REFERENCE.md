@@ -59,7 +59,7 @@ helper loads it from the repo root; OS environment variables win over `.env` val
 
 | Method | Signature | Purpose |
 |--------|-----------|---------|
-| `connect` | `async def connect() -> None` | Authenticate API key and establish ECDH + AES-GCM encrypted session |
+| `connect` | `async def connect() -> None` | Authenticate and establish Noise XK encrypted WebSocket session |
 | `disconnect` | `async def disconnect() -> None` | Graceful disconnect; cancels pending reconnect tasks |
 | `logout` | `async def logout() -> None` | Send docs `op: logout` when supported, then disconnect |
 | `__aenter__` / `__aexit__` | `async with GodarkClient(...) as c:` | Async-context wrapper around `connect()` / `disconnect()` |
@@ -74,6 +74,7 @@ helper loads it from the repo root; OS environment variables win over `.env` val
 - `api_key_id`, `api_secret` — required pair (or single `api_key="<id>:<secret>"` token).
 - `base_url` — host-only WebSocket origin; SDK appends `/ws/v1`. Falls back to `GODARK_EDGE_URL` / `GDX_EDGE_URL` then production.
 - `user_uuid` — fallback used when the edge auth response omits a user id; falls back to `GODARK_USER_UUID` / `GDX_USER_UUID`.
+- `noise_static_public_key_hex` — pinned sequencer Noise static key (64 hex); defaults to `GDX_NOISE_STATIC_PUBLIC_KEY` and aliases.
 - `auto_reconnect=True` — automatically reconnect after transport drops.
 - `symbol_map=None` — override the default symbol-name → numeric-id table.
 - `transport=None` — `TransportConfig` for TLS, headers, timeouts, heartbeats.
@@ -277,7 +278,7 @@ built-in `Exception`):
 ```text
 GodarkError
 ├── AuthenticationError   # API key / handshake auth failed
-├── SessionError          # ECDH session setup or rekey failed
+├── SessionError          # Noise XK handshake or rekey failed
 ├── OrderError            # sequencer rejected the order; carries .error_code
 ├── ConnectionError       # WebSocket transport / not-connected guard
 ├── EncryptionError       # AES-GCM encryption / decryption failed
@@ -340,7 +341,7 @@ sdk/
 ├── shared/symbols.json
 └── godark/
     ├── __init__.py           # public re-exports
-    ├── client.py             # GodarkClient: pushes + ECDH encrypted trading
+    ├── client.py             # GodarkClient: pushes + Noise XK encrypted trading
     ├── enums.py
     ├── types.py
     ├── errors.py

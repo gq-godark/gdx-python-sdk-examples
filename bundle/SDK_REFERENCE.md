@@ -36,6 +36,8 @@ The MM examples expect:
 
 - `GODARK_API_KEY_ID` (required)
 - `GODARK_API_SECRET` (required)
+- `GODARK_PASSPHRASE` (required for API key-pair auth)
+- `GDX_NOISE_STATIC_PUBLIC_KEY` (required for encrypted WebSocket trading) — 64 hex chars; aliases `GDX_NOISE_STATIC_PUBKEY`, `GODARK_NOISE_STATIC_PUBLIC_KEY`
 - `GODARK_EDGE_URL` (optional, defaults to `wss://api.godark-dex.com`)
 
 Use `.env.example` as the template for your local `.env`.
@@ -48,7 +50,7 @@ Use `.env.example` as the template for your local `.env`.
 
 | Method | Signature | Purpose |
 |--------|-----------|---------|
-| `connect` | `async def connect() -> None` | Authenticate and establish encrypted session |
+| `connect` | `async def connect() -> None` | Authenticate and establish Noise XK encrypted session |
 | `disconnect` | `async def disconnect() -> None` | Graceful disconnect |
 | `logout` | `async def logout() -> None` | Logout and disconnect |
 | `__aenter__` / `__aexit__` | `async with GodarkClient(...) as c:` | Async-context wrapper around `connect()` / `disconnect()` |
