@@ -236,6 +236,84 @@ async def main() -> int:
     await asyncio.sleep(1)
     drain_orders("after SELL/CANCEL")
 
+    # --- Bulk quote (mass quote) -------------------------------------------
+    # Place a whole ladder of resting quotes in a single batched request. With
+    # the default (post_only) mode every leg is post-only: a leg that would
+    # cross is rejected as "failed" so the batch fuses into one MPC round. Pass
+    # post_only=False for the relaxed path, where a crossing leg takes liquidity
+    # up to its limit and rests the remainder (reported per leg as fill_count).
+    # `GDX_BASE` anchors the ladder/cross near the live mark (default 64000).
+    base = float(os.environ.get("GDX_BASE", "64000"))
+    print("Mass-quoting a 3-level BUY ladder (post-only)...")
+    ladder = [
+        {"side": Side.BUY, "price": round(base * (1 - 0.003), 1), "quantity": 0.02},
+        {"side": Side.BUY, "price": round(base * (1 - 0.006), 1), "quantity": 0.02},
+        {"side": Side.BUY, "price": round(base * (1 - 0.009), 1), "quantity": 0.02},
+    ]
+    resting_ids: list[int] = []
+    try:
+        mq = await client.mass_quote(SYMBOL, ladder, leverage=1)
+        print(f"Mass quote: success={mq.success} sequence={mq.sequence} legs={len(mq.results)}")
+        for r in mq.results:
+            print(
+                f"  leg {r.leg_index}: status={r.status} new_order_id={r.new_order_id} "
+                f"fills={r.fill_count} err={r.error_code}",
+                flush=True,
+            )
+            if r.status == "open" and r.new_order_id:
+                resting_ids.append(int(r.new_order_id))
+    except Exception as e:
+        print_order_error("Mass quote rejected", e)
+
+    await asyncio.sleep(1)
+    drain_orders("after MASS QUOTE")
+
+    if resting_ids:
+        print(f"Batch-cancelling {len(resting_ids)} ladder orders (cleanup)...")
+        try:
+            bc = await client.batch_cancel(SYMBOL, resting_ids)
+            for r in bc.results:
+                print(
+                    f"  cancel id={r.order_id}: cancelled={r.cancelled} err={r.error_code}",
+                    flush=True,
+                )
+        except Exception as e:
+            print_order_error("Batch cancel rejected", e)
+        await asyncio.sleep(0.5)
+        drain_orders("after BATCH CANCEL")
+
+    # Demonstrate the batch-level post_only flag on a crossing leg.
+    cross_px = round(base * 1.02, 1)
+    # post_only=True: a crossing leg is rejected (would-cross, error_code 2018).
+    print("Mass-quoting a crossing BUY with post_only=True (expect rejected/2018)...")
+    try:
+        mq = await client.mass_quote(
+            SYMBOL, [{"side": Side.BUY, "price": cross_px, "quantity": 0.001}],
+            leverage=1, post_only=True,
+        )
+        for r in mq.results:
+            print(f"  leg {r.leg_index}: status={r.status} err={r.error_code} "
+                  f"fills={r.fill_count}", flush=True)
+    except Exception as e:
+        print_order_error("post_only=True mass quote rejected", e)
+    await asyncio.sleep(0.5)
+
+    # post_only=False (relaxed): the crossing leg takes liquidity up to its limit
+    # and rests the remainder; taker fills are reported per leg as fill_count.
+    print("Mass-quoting a crossing BUY with post_only=False (expect filled, fill_count>0)...")
+    try:
+        mq = await client.mass_quote(
+            SYMBOL, [{"side": Side.BUY, "price": cross_px, "quantity": 0.003}],
+            leverage=1, post_only=False,
+        )
+        for r in mq.results:
+            print(f"  leg {r.leg_index}: status={r.status} new_order_id={r.new_order_id} "
+                  f"err={r.error_code} fills={r.fill_count}", flush=True)
+    except Exception as e:
+        print_order_error("post_only=False mass quote rejected", e)
+    await asyncio.sleep(1)
+    drain_orders("after post_only mass quotes")
+
     print("Cancelling original BUY (cleanup)...")
     try:
         await client.cancel_order(str(buy_ack.order_id), SYMBOL)
