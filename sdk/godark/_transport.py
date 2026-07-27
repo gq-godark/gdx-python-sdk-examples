@@ -56,6 +56,7 @@ def _normalize_inbound_message(msg: dict[str, Any]) -> dict[str, Any]:
                 "type": "auth_result",
                 "success": True,
                 "user_uuid": uid,
+                "conn_id": data.get("conn_id"),
                 "account_id": data.get("account_id"),
                 "session_id": data.get("session_id"),
                 "token_expires_at": data.get("token_expires_at"),
@@ -73,6 +74,18 @@ def _normalize_inbound_message(msg: dict[str, Any]) -> dict[str, Any]:
             "type": "session_established",
             "sequencer_ecdh_pubkey": seq_pk,
             "session_id": data.get("session_id"),
+        }
+
+    if op in ("noise.handshake", "noise_handshake"):
+        if code != 0:
+            return {"type": "error", "message": err_text or "Noise handshake failed"}
+        if not isinstance(data, dict):
+            return {"type": "error", "message": "invalid Noise handshake response"}
+        return {
+            "type": "noise_handshake_reply",
+            "conn_id": data.get("conn_id"),
+            "message": data.get("message", ""),
+            "established": bool(data.get("established", False)),
         }
 
     if op in ("subscribe", "unsubscribe"):
@@ -94,19 +107,37 @@ def _normalize_inbound_message(msg: dict[str, Any]) -> dict[str, Any]:
             return {"type": "error", "message": err_text or "logout failed"}
         return {"type": "ack", "success": True}
 
-    if op in ("order.place", "order.cancel", "order.modify"):
+    if op in (
+        "order.place",
+        "order.cancel",
+        "order.modify",
+        "order.mass_quote",
+        "order.batch_cancel",
+        "order.batch_modify",
+    ):
+        wire_id = msg.get("id")
         if code != 0:
-            return {"type": "error", "message": err_text or "order error"}
+            return {
+                "type": "error",
+                "message": err_text or "order error",
+                "wire_id": wire_id,
+            }
         if not isinstance(data, dict):
             return {"type": "error", "message": "invalid order response"}
-        if data.get("message_type") == "ack":
+        # Encrypted acks (single-order "ack" or batch "*_ack") come back as a
+        # ciphertext frame the client decrypts; surface them as a push.
+        if data.get("message_type") and ("ciphertext" in data or "encrypted_body" in data):
             ciphertext = data.get("ciphertext", data.get("encrypted_body", ""))
             return {
                 "type": "encrypted_push",
-                "message_type": "ack",
+                "message_type": data.get("message_type"),
                 "encrypted_body": ciphertext,
                 "nonce": data.get("nonce", 0),
                 "fencing_epoch": data.get("fencing_epoch", 0),
+                "correlation_id": data.get("correlation_id"),
+                "session_seq": data.get("session_seq"),
+                "conn_id": data.get("conn_id"),
+                "wire_id": wire_id,
             }
         return {
             "type": "ack",
@@ -115,6 +146,8 @@ def _normalize_inbound_message(msg: dict[str, Any]) -> dict[str, Any]:
             "sequence": data.get("sequence"),
             "error": data.get("error"),
             "error_code": data.get("error_code"),
+            "correlation_id": data.get("correlation_id"),
+            "wire_id": wire_id,
         }
 
     if isinstance(data, dict) and data.get("event") == "rekey_required":
@@ -132,6 +165,9 @@ def _normalize_inbound_message(msg: dict[str, Any]) -> dict[str, Any]:
             "encrypted_body": ciphertext,
             "nonce": data.get("nonce", 0),
             "fencing_epoch": data.get("fencing_epoch", 0),
+            "correlation_id": data.get("correlation_id"),
+            "session_seq": data.get("session_seq"),
+            "conn_id": data.get("conn_id"),
         }
 
     return msg
@@ -198,8 +234,21 @@ class EdgeTransport:
         self._heartbeat_task: asyncio.Task | None = None
         self._recv_task: asyncio.Task | None = None
 
-        # Command serialization: one pending command at a time
+        # Command waiters.
+        #
+        # Correlation-keyed commands (encrypted trading ops) may be in flight
+        # concurrently: each registers a future under its correlation id and
+        # awaits it *without* holding a global lock, so throughput is bounded by
+        # the server round-trip rather than one-command-at-a-time. Commands with
+        # no correlation id (e.g. the noise handshake) fall back to the single
+        # ``_cmd_future`` slot and are serialized via ``_cmd_lock``.
         self._cmd_future: asyncio.Future | None = None
+        # Concurrent command waiters, keyed by header correlation id and by
+        # wire id. Business rejects come back as a top-level error that carries
+        # only the wire id (no correlation id), so both keys map to the same
+        # future to guarantee the response finds its waiter.
+        self._pending_by_correlation: dict[str, asyncio.Future] = {}
+        self._pending_by_wire_id: dict[str, asyncio.Future] = {}
         self._cmd_lock = asyncio.Lock()
         self._use_docs_wire: bool = self._config.use_docs_wire
 
@@ -225,6 +274,10 @@ class EdgeTransport:
     @property
     def use_docs_wire(self) -> bool:
         return self._use_docs_wire
+
+    @property
+    def command_timeout(self) -> float:
+        return self._command_timeout
 
     def _new_wire_id(self) -> str:
         return str(uuid.uuid4())
@@ -277,15 +330,113 @@ class EdgeTransport:
             raise RuntimeError("Not connected")
         await self._ws.send(json.dumps(obj))
 
-    async def send_command(self, payload: dict) -> dict:
+    @staticmethod
+    def _command_correlation_id(payload: dict) -> str:
+        """Return the normalized correlation id carried by an outbound command.
+
+        Encrypted trading ops stamp a 16-byte correlation id (hex) into the
+        header. Returns "" when the payload has no correlation id (e.g. the
+        noise handshake), which selects the serialized single-slot path.
+        """
+        header: Any = None
+        args = payload.get("args")
+        if isinstance(args, dict):
+            header = args.get("header")
+        if header is None:
+            data = payload.get("data")
+            if isinstance(data, dict):
+                header = data.get("header")
+        if isinstance(header, dict):
+            corr = header.get("correlation_id")
+            if isinstance(corr, str) and corr:
+                return corr.lower()
+        return ""
+
+    async def send_command(
+        self,
+        payload: dict | None = None,
+        *,
+        prepare: Callable[[], dict] | None = None,
+    ) -> dict:
         """
         Send a command and wait for its ack/error response.
-        Serializes commands so only one is in flight at a time.
+
+        Either ``payload`` (a ready frame) or ``prepare`` (a callable that
+        builds and returns the frame while the send lock is held) must be
+        given. ``prepare`` lets callers keep nonce assignment / encryption
+        atomic with the send so concurrent commands still hit the wire in
+        nonce order.
+
+        Commands carrying a correlation id (encrypted trading ops) may be in
+        flight concurrently: the response is matched back by correlation id, so
+        the send lock is released as soon as the frame is on the wire. Commands
+        without a correlation id use the single ``_cmd_future`` slot and are
+        serialized so their unkeyed responses cannot be confused.
         """
+        loop = asyncio.get_running_loop()
+
+        # Fast path: correlation id is knowable up front (payload given).
+        # When ``prepare`` builds the frame under the lock we discover the
+        # correlation id after building it.
+        if payload is not None and prepare is None:
+            corr = self._command_correlation_id(payload)
+            if not corr:
+                return await self._send_serialized(payload, loop)
+
+        fut = loop.create_future()
+        corr = ""
+        wire_id = ""
         async with self._cmd_lock:
             if not self._ws:
                 raise RuntimeError("Not connected")
-            loop = asyncio.get_running_loop()
+            frame = prepare() if prepare is not None else payload
+            assert frame is not None
+            corr = self._command_correlation_id(frame)
+            wire_id = frame.get("id") if isinstance(frame.get("id"), str) else ""
+            if not corr:
+                # No correlation id even after prepare(): fall back to the
+                # serialized single slot, still under the same lock.
+                self._cmd_future = fut
+                try:
+                    await self.send_json(frame)
+                except Exception:
+                    self._cmd_future = None
+                    raise
+            else:
+                existing = self._pending_by_correlation.get(corr)
+                if existing is not None and not existing.done():
+                    existing.set_exception(
+                        RuntimeError("superseded by duplicate correlation id")
+                    )
+                self._pending_by_correlation[corr] = fut
+                if wire_id:
+                    self._pending_by_wire_id[wire_id] = fut
+                try:
+                    await self.send_json(frame)
+                except Exception:
+                    self._pending_by_correlation.pop(corr, None)
+                    if wire_id:
+                        self._pending_by_wire_id.pop(wire_id, None)
+                    raise
+
+        try:
+            return await asyncio.wait_for(fut, timeout=self._command_timeout)
+        except asyncio.TimeoutError:
+            raise GdxTimeoutError(
+                f"Command timed out after {self._command_timeout:.0f}s"
+            ) from None
+        finally:
+            if corr:
+                self._pending_by_correlation.pop(corr, None)
+                if wire_id:
+                    self._pending_by_wire_id.pop(wire_id, None)
+            elif self._cmd_future is fut:
+                self._cmd_future = None
+
+    async def _send_serialized(self, payload: dict, loop: asyncio.AbstractEventLoop) -> dict:
+        async with self._cmd_lock:
+            if not self._ws:
+                raise RuntimeError("Not connected")
             self._cmd_future = loop.create_future()
             await self.send_json(payload)
             try:
@@ -355,20 +506,59 @@ class EdgeTransport:
 
         return result
 
+    @staticmethod
+    def _normalize_correlation_key(corr: Any) -> str:
+        return corr.lower() if isinstance(corr, str) and corr else ""
+
     def resolve_command(self, result: dict) -> bool:
         """Resolve the pending command future with the given result.
 
-        Returns True if a pending future was resolved, False otherwise.
-        Used by GodarkClient to route encrypted ack pushes back to the
-        awaiting send_command call without accessing private state.
+        When the result carries a correlation id it is matched back to the
+        specific concurrent waiter registered by ``send_command``; otherwise it
+        falls back to the single ``_cmd_future`` slot. Returns True if a
+        pending future was resolved. Used by GodarkClient to route encrypted
+        ack pushes back to the awaiting ``send_command`` call.
         """
+        # Prefer the header correlation id; fall back to the wire id (business
+        # rejects arrive as a top-level error carrying only the wire id).
+        corr = self._normalize_correlation_key(result.get("correlation_id"))
+        wire_id = result.get("wire_id")
+        wire_id = wire_id if isinstance(wire_id, str) and wire_id else ""
+
+        fut: asyncio.Future | None = None
+        if corr:
+            fut = self._pending_by_correlation.get(corr)
+        if fut is None and wire_id:
+            fut = self._pending_by_wire_id.get(wire_id)
+        if fut is not None:
+            self._forget_waiter(fut)
+            if not fut.done():
+                fut.set_result(result)
+                return True
+
         if self._cmd_future and not self._cmd_future.done():
             self._cmd_future.set_result(result)
             return True
         return False
 
+    def _forget_waiter(self, fut: asyncio.Future) -> None:
+        """Drop a future from both correlation and wire-id waiter maps."""
+        for key, val in list(self._pending_by_correlation.items()):
+            if val is fut:
+                self._pending_by_correlation.pop(key, None)
+        for key, val in list(self._pending_by_wire_id.items()):
+            if val is fut:
+                self._pending_by_wire_id.pop(key, None)
+
     def _reject_pending(self, reason: str) -> None:
         """Reject any pending command/subscription futures."""
+        for fut in list(self._pending_by_correlation.values()) + list(
+            self._pending_by_wire_id.values()
+        ):
+            if not fut.done():
+                fut.set_exception(RuntimeError(reason))
+        self._pending_by_correlation.clear()
+        self._pending_by_wire_id.clear()
         if self._cmd_future and not self._cmd_future.done():
             self._cmd_future.set_exception(RuntimeError(reason))
         self._cmd_future = None
@@ -431,6 +621,10 @@ class EdgeTransport:
                 self.on_encrypted_push(msg)
             return
 
+        if msg_type == "noise_handshake_reply":
+            self.resolve_command(msg)
+            return
+
         # Subscription acks (event-tagged, not type-tagged)
         if event in ("subscribe", "unsubscribe"):
             if self._sub_waiter and not self._sub_waiter.done() and event == self._sub_op:
@@ -444,15 +638,10 @@ class EdgeTransport:
                 self._sub_waiter.set_exception(RuntimeError(msg.get("message", "channel error")))
             return
 
-        # ack / error responses for commands
-        if msg_type == "ack":
-            if self._cmd_future and not self._cmd_future.done():
-                self._cmd_future.set_result(msg)
-            return
-
-        if msg_type == "error":
-            if self._cmd_future and not self._cmd_future.done():
-                self._cmd_future.set_result(msg)
+        # ack / error responses for commands (routed by correlation id when
+        # present, else to the single serialized slot).
+        if msg_type in ("ack", "error"):
+            self.resolve_command(msg)
             return
 
     async def _heartbeat_loop(self) -> None:

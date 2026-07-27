@@ -152,6 +152,9 @@ _REQUEST_TYPE_TO_PROTO: dict[str, int] = {
     "get_open_orders": 6,
     "get_order_history": 7,
     "update_leverage": 8,
+    "mass_quote": 10,
+    "batch_cancel": 11,
+    "batch_modify": 12,
 }
 
 _RESPONSE_MESSAGE_TYPE_TO_PROTO: dict[str, int] = {
@@ -161,6 +164,11 @@ _RESPONSE_MESSAGE_TYPE_TO_PROTO: dict[str, int] = {
     "open_orders_snapshot": 5,
     "order_history_snapshot": 6,
     "positions_snapshot": 7,
+    "balance_and_position": 8,
+    "account_margin_update": 9,
+    "mass_quote_ack": 10,
+    "batch_cancel_ack": 11,
+    "batch_modify_ack": 12,
 }
 
 

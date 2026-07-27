@@ -10,13 +10,21 @@ import os
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
-from . import _crypto, _identity, _proto  # noqa: F401 (_crypto registers protobuf codecs)
-from ._session import CryptoSession
+from . import _identity, _proto
+from ._noise import HandshakeInitiator, pinned_sequencer_static_pub, prologue_for_user
+from ._session import STAMPED_NONCE_PUSH, CryptoSession
 from ._symbols import load_default_symbol_map
 from ._transport import EdgeTransport, TransportConfig
-from .enums import _RESPONSE_MESSAGE_TYPE_TO_PROTO, OrderType, Side, TimeInForce
+from .enums import (
+    _RESPONSE_MESSAGE_TYPE_TO_PROTO,
+    OrderStatus,
+    OrderType,
+    OrderUpdateType,
+    Side,
+    TimeInForce,
+)
 from .errors import (
     AuthenticationError,
     ConnectionError,
@@ -24,12 +32,19 @@ from .errors import (
     GodarkError,
     OrderError,
     SessionError,
+    TimeoutError,
 )
-from .order_error_code import make_order_error_from_code, make_order_error_from_json
+from .order_error_code import make_order_error_from_json
 from .types import (
     BalanceUpdate,
+    BatchCancelAck,
+    BatchCancelLegResult,
+    BatchModifyAck,
+    BatchModifyLegResult,
     FundingRateUpdate,
     MarginAlert,
+    MassQuoteAck,
+    MassQuoteLegResult,
     OrderAck,
     OrderUpdate,
     PositionsSnapshot,
@@ -43,8 +58,16 @@ TStream = TypeVar("TStream")
 
 logger = logging.getLogger("godark")
 
-_GCM_TAG_LEN = 16
 _REQUEST_TYPE_MAP = {"place": "place", "cancel": "cancel", "modify": "modify"}
+
+# Encrypted command request_type -> the ack message_type it resolves on. Batched
+# commands get their own ack type so an async order "ack" pushed mid-flight does
+# not resolve them early; everything else falls back to the generic "ack".
+_INFLIGHT_ACK_TYPE = {
+    "mass_quote": "mass_quote_ack",
+    "batch_cancel": "batch_cancel_ack",
+    "batch_modify": "batch_modify_ack",
+}
 
 # Production WebSocket origin (GodarkClient appends `/ws/v1`).
 _DEFAULT_EDGE_BASE_URL = "wss://api.godark-dex.com"
@@ -111,27 +134,11 @@ def _timestamp_ns() -> int:
     return int(time.time() * 1_000_000_000)
 
 
-def _coerce_numeric_error_code(value: Any) -> int | None:
-    """If ``value`` is a protobuf-style numeric ack code, return it."""
-    if value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        stripped = value.strip()
-        if stripped.isdigit():
-            try:
-                return int(stripped)
-            except ValueError:
-                return None
-    return None
-
-
 class GodarkClient:
     """
     Async trading client for the GoDark DEX.
 
-    Handles API-key authentication, ECDH session negotiation, AES-256-GCM
+    Handles API-key authentication, Noise XK session negotiation, bound-AEAD
     encrypted order flow, and real-time order/position streaming.
 
     Parameters:
@@ -150,6 +157,13 @@ class GodarkClient:
         symbol_map: Custom symbol-name-to-id mapping.
         transport: Low-level transport config (TLS, timeouts, etc.).
         stream_buffer_size: Max buffered order/position updates.
+        place_order_terminal_timeout: Seconds to wait after the fast place ack for
+            an OPEN/reject/fill/cancel update when ``confirmation="book"``.
+            Defaults to the command timeout.
+        noise_static_public_key_hex: Pinned 32-byte sequencer X25519 static key
+            in hexadecimal. Defaults to ``GDX_NOISE_STATIC_PUBLIC_KEY`` (or
+            the compatible ``GDX_NOISE_STATIC_PUBKEY`` /
+            ``GODARK_NOISE_STATIC_PUBLIC_KEY`` environment variables).
 
     Usage::
 
@@ -184,6 +198,8 @@ class GodarkClient:
         symbol_map: dict[str, int] | None = None,
         transport: TransportConfig | None = None,
         stream_buffer_size: int = 256,
+        place_order_terminal_timeout: float | None = None,
+        noise_static_public_key_hex: str | None = None,
     ):
         if api_key_id is not None or api_secret is not None:
             if api_key_id is None or api_secret is None:
@@ -206,18 +222,37 @@ class GodarkClient:
         self._auto_reconnect = auto_reconnect
         self._symbol_map = dict(symbol_map) if symbol_map is not None else load_default_symbol_map()
         self._transport_config = transport
+        self._noise_static_public_key_hex = (
+            noise_static_public_key_hex.strip() if noise_static_public_key_hex else None
+        )
+        self._place_order_terminal_timeout = (
+            place_order_terminal_timeout
+            if place_order_terminal_timeout is not None
+            else (
+                transport.command_timeout
+                if transport is not None and transport.command_timeout is not None
+                else EdgeTransport.COMMAND_TIMEOUT
+            )
+        )
 
         if stream_buffer_size < 1:
             raise ValueError("stream_buffer_size must be >= 1")
 
         self._transport = EdgeTransport(_ws_url(self._base_url), self._transport_config)
         self._session = CryptoSession()
+        self._conn_id = 0
         self._user_uuid: str | None = None
         self._account_id: str | None = None
         self._login_session_id: str | None = None
         self._token_expires_at: str | None = None
         self._cancel_on_disconnect = False
         self._connected = False
+        # The ack message_type the currently in-flight encrypted command waits
+        # for (set by _send_encrypted_command); guards batch acks from being
+        # resolved early by an unrelated async "ack" push.
+        self._inflight_response_type: str | None = None
+        # Per-correlation expected ack type for concurrent in-flight commands.
+        self._expected_ack_by_correlation: dict[str, str] = {}
 
         self._desired_channels: set[str] = set()
         self._order_queue: asyncio.Queue[OrderUpdate] = asyncio.Queue(maxsize=stream_buffer_size)
@@ -252,6 +287,9 @@ class GodarkClient:
         self._settlement_callbacks: list[Callable[[SettlementUpdate], None]] = []
         self._reconnect_callbacks: list[Callable[[], None]] = []
         self._error_callbacks: list[Callable[[BaseException], None]] = []
+        self._place_outcome_waiters: list[dict[str, Any]] = []
+        self._recent_terminal_updates: list[OrderUpdate] = []
+        self._pending_encrypted_by_nonce: dict[int, dict] = {}
 
         self._reconnect_task: asyncio.Task | None = None
         self._reconnect_attempts = 0
@@ -288,7 +326,7 @@ class GodarkClient:
     # ------------------------------------------------------------------
 
     async def connect(self) -> None:
-        """Connect, authenticate, and establish ECDH session."""
+        """Connect, authenticate, and establish a Noise XK session."""
         self._intentional_close = False
 
         await self._transport.connect()
@@ -325,7 +363,20 @@ class GodarkClient:
         )
         self._cancel_on_disconnect = bool(auth_result.get("cancel_on_disconnect", False))
 
-        await self._setup_ecdh_session()
+        try:
+            self._conn_id = int(auth_result["conn_id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            await self._transport.disconnect()
+            raise AuthenticationError(
+                "auth response missing non-zero conn_id (required for Noise XK)"
+            ) from exc
+        if self._conn_id == 0:
+            await self._transport.disconnect()
+            raise AuthenticationError(
+                "auth response missing non-zero conn_id (required for Noise XK)"
+            )
+
+        await self._setup_noise_session()
         self._connected = True
         self._reconnect_attempts = 0
         logger.info("GodarkClient connected and authenticated")
@@ -334,10 +385,12 @@ class GodarkClient:
         """Gracefully disconnect."""
         self._intentional_close = True
         self._connected = False
+        self._clear_place_outcomes(ConnectionError("Disconnected before book confirmation"))
         if self._reconnect_task:
             self._reconnect_task.cancel()
             self._reconnect_task = None
         await self._transport.disconnect()
+        self._pending_encrypted_by_nonce.clear()
         self._session.reset()
 
     async def logout(self) -> None:
@@ -373,8 +426,16 @@ class GodarkClient:
         aon: bool = False,
         min_fill_size: float | None = None,
         expiry_time: int | None = None,
+        confirmation: Literal["ack", "book"] = "book",
     ) -> OrderAck:
-        """Place an order. Returns OrderAck on success, raises OrderError on rejection."""
+        """Place an order with explicit acknowledgement or book confirmation.
+
+        ``confirmation="ack"`` returns as soon as the sequencer acknowledges the
+        request. ``confirmation="book"`` (the default) waits for the subsequent
+        OPEN, REJECTED, FILLED, PARTIALLY_FILLED, or CANCELLED order update.
+        """
+        if confirmation not in ("ack", "book"):
+            raise ValueError("confirmation must be 'ack' or 'book'")
         self._ensure_ready()
         symbol_id = self._resolve_symbol(symbol)
         side_str = side.value if isinstance(side, Side) else side
@@ -397,7 +458,19 @@ class GodarkClient:
             timestamp=_timestamp_ns(),
         )
 
-        return await self._send_encrypted_order("place", symbol_id, plaintext, corr_id)
+        waiter = self._register_place_outcome_waiter() if confirmation == "book" else None
+        try:
+            ack = await self._send_encrypted_order("place", symbol_id, plaintext, corr_id)
+        except BaseException:
+            self._cancel_place_outcome_waiter(waiter)
+            raise
+
+        if waiter is None:
+            return ack
+        update = await self._await_place_outcome(ack.order_id, waiter)
+        if update.update_type == OrderUpdateType.REJECTED or update.status == OrderStatus.REJECTED:
+            raise make_order_error_from_json(update.msg, update.reject_reason)
+        return ack
 
     async def cancel_order(self, order_id: str, symbol: str = "BTC-USDC-PERP") -> OrderAck:
         """Cancel an order by ID."""
@@ -436,6 +509,107 @@ class GodarkClient:
         )
 
         return await self._send_encrypted_order("modify", symbol_id, plaintext, corr_id)
+
+    async def mass_quote(
+        self,
+        symbol: str,
+        legs: list[dict],
+        leverage: int = 1,
+        post_only: bool | None = None,
+    ) -> MassQuoteAck:
+        """Bulk cancel-replace (market-maker mass quote).
+
+        Each ``leg`` is a dict with: ``side`` ("BUY"/"SELL" or :class:`Side`),
+        ``price`` (float), ``quantity`` (float), optional ``cancel_order_id``
+        (int; omit/0 = pure place), ``time_in_force`` ("GTC"/"GTD", default GTC),
+        ``expiry_time`` (ns, GTD only). Up to 20 legs per batch, single symbol.
+
+        ``post_only`` controls the batch matching mode. Left as ``None`` (the
+        default) every replacement is post-only: a leg that would cross is
+        rejected as ``failed``, which lets the whole batch fuse into one MPC
+        round. Pass ``post_only=False`` for the relaxed path, where a crossing
+        leg instead takes liquidity up to its limit and rests the remainder; the
+        number of taker fills is reported per leg as ``fill_count``. Both modes
+        keep online MPC rounds flat in the number of legs.
+
+        Returns a :class:`MassQuoteAck` with one result per leg.
+        """
+        self._ensure_ready()
+        symbol_id = self._resolve_symbol(symbol)
+        corr_id = _new_correlation_id()
+
+        plaintext = _proto.build_mass_quote_proto(
+            symbol_id=symbol_id,
+            user_uuid=self._user_uuid_bytes(),
+            legs=legs,
+            correlation_id_bytes=corr_id,
+            leverage=leverage,
+            post_only=post_only,
+        )
+        response = await self._send_encrypted_command(
+            "mass_quote", "order.mass_quote", symbol_id, plaintext, corr_id
+        )
+        return self._parse_mass_quote_response(response)
+
+    async def batch_cancel(
+        self,
+        symbol: str,
+        order_ids: list[int],
+    ) -> BatchCancelAck:
+        """Cancel multiple resting orders in a single fanned-out request.
+
+        ``order_ids`` is a list of resting order ids on one ``symbol`` (up to 20
+        per batch). Cancels are pure index removals (no MPC comparison), so the
+        whole batch costs zero online rounds regardless of count. Returns a
+        :class:`BatchCancelAck` with one result per id, in input order; an id
+        that is not resting is reported as ``cancelled=False`` (error_code 2003)
+        and never aborts the rest of the batch.
+        """
+        self._ensure_ready()
+        symbol_id = self._resolve_symbol(symbol)
+        corr_id = _new_correlation_id()
+
+        plaintext = _proto.build_batch_cancel_proto(
+            symbol_id=symbol_id,
+            user_uuid=self._user_uuid_bytes(),
+            order_ids=order_ids,
+            correlation_id_bytes=corr_id,
+        )
+        response = await self._send_encrypted_command(
+            "batch_cancel", "order.batch_cancel", symbol_id, plaintext, corr_id
+        )
+        return self._parse_batch_cancel_response(response)
+
+    async def batch_modify(
+        self,
+        symbol: str,
+        legs: list[dict],
+    ) -> BatchModifyAck:
+        """Amend multiple resting orders in a single fanned-out post-only request.
+
+        ``legs`` is a list of dicts on one ``symbol`` (up to 20 per batch); each
+        leg supports ``order_id`` (int, required), ``new_price`` (float|None) and
+        ``new_quantity`` (float|None) — at least one of the two must be set.
+        Amends are post-only: a leg whose amended order would cross is rejected
+        (``modified=False``, error_code 2018) rather than taking liquidity, and a
+        missing order id is reported ``modified=False`` (error_code 2003); neither
+        aborts the rest of the batch. Returns a :class:`BatchModifyAck` with one
+        result per leg, in input order.
+        """
+        self._ensure_ready()
+        symbol_id = self._resolve_symbol(symbol)
+        corr_id = _new_correlation_id()
+
+        plaintext = _proto.build_batch_modify_proto(
+            symbol_id=symbol_id,
+            user_uuid=self._user_uuid_bytes(),
+            legs=legs,
+            correlation_id_bytes=corr_id,
+        )
+        response = await self._send_encrypted_command(
+            "batch_modify", "order.batch_modify", symbol_id, plaintext, corr_id
+        )
+        return self._parse_batch_modify_response(response)
 
     # ------------------------------------------------------------------
     # Subscriptions & streaming
@@ -560,58 +734,50 @@ class GodarkClient:
         queue.put_nowait(item)
 
     # ------------------------------------------------------------------
-    # Internals: ECDH session
+    # Internals: Noise XK session
     # ------------------------------------------------------------------
 
-    async def _setup_ecdh_session(self) -> None:
-        client_pk_b64 = self._session.generate_keypair()
+    async def _setup_noise_session(self) -> None:
+        """Complete the three-message Noise XK handshake over the active WebSocket."""
+        if self._user_uuid is None or self._conn_id == 0:
+            raise SessionError("user_uuid and conn_id required before Noise XK handshake")
+        try:
+            remote_static = pinned_sequencer_static_pub(self._noise_static_public_key_hex)
+        except ValueError as exc:
+            raise SessionError(str(exc)) from exc
+        initiator = HandshakeInitiator(remote_static, prologue_for_user(self._user_uuid_bytes()))
 
-        loop = asyncio.get_running_loop()
-        session_future: asyncio.Future = loop.create_future()
-
-        def _on_established(msg: dict):
-            if not session_future.done():
-                session_future.set_result(msg)
-
-        prev = self._transport.on_session_established
-        self._transport.on_session_established = _on_established
-
-        if self._transport.use_docs_wire:
-            await self._transport.send_json(
+        async def send(message: bytes) -> dict:
+            payload = (
                 {
                     "id": str(uuid.uuid4()),
-                    "op": "session.setup",
-                    "args": {"client_ecdh_pubkey": client_pk_b64},
+                    "op": "noise.handshake",
+                    "args": {"message": base64.b64encode(message).decode("ascii")},
+                }
+                if self._transport.use_docs_wire
+                else {
+                    "type": "noise_handshake",
+                    "data": {"message": base64.b64encode(message).decode("ascii")},
                 }
             )
-        else:
-            await self._transport.send_json(
-                {
-                    "type": "session_setup",
-                    "data": {
-                        "user_uuid": self._user_uuid,
-                        "client_ecdh_pubkey": client_pk_b64,
-                    },
-                }
-            )
+            response = await self._transport.send_command(payload)
+            if response.get("type") == "error":
+                raise SessionError(response.get("message", "Noise handshake failed"))
+            return response
 
+        reply = await send(initiator.write_message())
+        if int(reply.get("conn_id", 0)) != self._conn_id or bool(reply.get("established")):
+            raise SessionError("invalid Noise handshake message-2 reply")
         try:
-            result = await asyncio.wait_for(session_future, timeout=10.0)
-        except asyncio.TimeoutError:
-            raise SessionError("ECDH session setup timed out") from None
-        finally:
-            self._transport.on_session_established = prev
+            initiator.read_message(base64.b64decode(reply.get("message", ""), validate=True))
+        except Exception as exc:
+            raise SessionError(f"invalid Noise handshake message-2: {exc}") from exc
 
-        if result.get("type") == "error":
-            raise SessionError(result.get("message", "session setup failed"))
-
-        seq_pk_b64 = result.get("sequencer_ecdh_pubkey", "")
-        session_id = result.get("session_id")
-        if isinstance(session_id, str):
-            session_id = int(session_id)
-
-        self._session.establish(seq_pk_b64, session_id)
-        logger.info("ECDH session established (session_id=%s)", session_id)
+        reply = await send(initiator.write_message())
+        if int(reply.get("conn_id", 0)) != self._conn_id or not bool(reply.get("established")):
+            raise SessionError("invalid Noise handshake completion reply")
+        self._session.establish(initiator.into_transport(), self._conn_id)
+        logger.info("Noise XK session established (conn_id=%s)", self._conn_id)
 
     # ------------------------------------------------------------------
     # Internals: encrypted order pipeline
@@ -632,50 +798,101 @@ class GodarkClient:
         Concurrent calls to ``place_order`` / ``cancel_order`` / ``modify_order``
         will wait on the same transport lock; do not expect parallel acks.
         """
-        body_length = len(plaintext) + _GCM_TAG_LEN
-        nonce_counter = self._session.next_nonce
-
-        aad = _proto.build_order_header_aad(
-            user_uuid=self._user_uuid_bytes(),
-            symbol_id=symbol_id,
-            request_type_str=request_type,
-            nonce=nonce_counter,
-            body_length=body_length,
-            correlation_id=correlation_id,
+        op_map = {"place": "order.place", "cancel": "order.cancel", "modify": "order.modify"}
+        response = await self._send_encrypted_command(
+            request_type, op_map[request_type], symbol_id, plaintext, correlation_id
         )
-
-        try:
-            actual_nonce, ciphertext = self._session.encrypt_order(aad, plaintext)
-        except Exception as e:
-            raise EncryptionError(f"Failed to encrypt order: {e}") from e
-
-        body_b64 = base64.b64encode(ciphertext).decode("ascii")
-        corr_id_str = _identity.bytes_to_uuid(correlation_id) if len(correlation_id) == 16 else ""
-        header_obj = {
-            "symbol_id": symbol_id,
-            "request_type": request_type,
-            "nonce": actual_nonce,
-            "body_length": body_length,
-            "correlation_id": corr_id_str,
-        }
-        if self._transport.use_docs_wire:
-            op_map = {"place": "order.place", "cancel": "order.cancel", "modify": "order.modify"}
-            payload = {
-                "id": str(uuid.uuid4()),
-                "op": op_map[request_type],
-                "args": {"header": header_obj, "ciphertext": body_b64},
-            }
-        else:
-            payload = {
-                "type": "encrypted_order",
-                "data": {
-                    "header": header_obj,
-                    "encrypted_body": body_b64,
-                },
-            }
-
-        response = await self._transport.send_command(payload)
         return self._parse_order_response(response)
+
+    async def _send_encrypted_command(
+        self,
+        request_type: str,
+        docs_op: str,
+        symbol_id: int,
+        plaintext: bytes,
+        correlation_id: bytes = b"",
+    ) -> dict:
+        """Encrypt one edge command and await its raw transport response.
+
+        Shared by order place/cancel/modify, mass quote and batch cancel/modify.
+        ``request_type`` sets the encrypted ``OrderHeader`` request type (also used
+        as AES-GCM AAD); ``docs_op`` is the WS docs op string in docs-wire mode.
+        """
+        body_length = CryptoSession.body_length_for_plaintext(len(plaintext))
+        corr_id_str = correlation_id.hex() if len(correlation_id) == 16 else ""
+        expected_ack = _INFLIGHT_ACK_TYPE.get(request_type, "ack")
+
+        # Encryption assigns and advances the session send-nonce, so it must be
+        # atomic with the actual send to keep concurrent commands in nonce
+        # order on the wire. ``prepare`` runs under the transport send lock.
+        def _prepare() -> dict:
+            nonce_counter = self._session.next_nonce
+            aad = _proto.build_order_header_aad(
+                user_uuid=self._user_uuid_bytes(),
+                symbol_id=symbol_id,
+                request_type_str=request_type,
+                nonce=nonce_counter,
+                body_length=body_length,
+                correlation_id=correlation_id,
+                conn_id=self._conn_id,
+            )
+            try:
+                actual_nonce, ciphertext = self._session.encrypt_order(aad, plaintext)
+            except Exception as e:
+                raise EncryptionError(f"Failed to encrypt order: {e}") from e
+
+            body_b64 = base64.b64encode(ciphertext).decode("ascii")
+            header_obj = {
+                "symbol_id": symbol_id,
+                "request_type": request_type,
+                "nonce": actual_nonce,
+                "body_length": body_length,
+                "correlation_id": corr_id_str,
+            }
+            if self._transport.use_docs_wire:
+                return {
+                    "id": str(uuid.uuid4()),
+                    "op": docs_op,
+                    "args": {"header": header_obj, "ciphertext": body_b64},
+                }
+            return {
+                "type": "encrypted_order",
+                "data": {"header": header_obj, "encrypted_body": body_b64},
+            }
+
+        # Record the ack type this command expects, keyed by correlation id so
+        # concurrent commands don't clobber one another. Falls back to the
+        # single-slot field when no correlation id is present (legacy path).
+        if corr_id_str:
+            self._expected_ack_by_correlation[corr_id_str.lower()] = expected_ack
+        else:
+            self._inflight_response_type = expected_ack
+        try:
+            response = await self._transport.send_command(prepare=_prepare)
+            if (
+                not STAMPED_NONCE_PUSH
+                and response.get("type") == "encrypted_push"
+                and response.get("nonce") is not None
+            ):
+                await self._wait_for_prior_noise_messages(int(response["nonce"]))
+            return response
+        finally:
+            if corr_id_str:
+                self._expected_ack_by_correlation.pop(corr_id_str.lower(), None)
+            else:
+                self._inflight_response_type = None
+
+    async def _wait_for_prior_noise_messages(self, command_ack_nonce: int) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._transport.command_timeout
+        while self._session.recv_nonce < command_ack_nonce:
+            if loop.time() >= deadline:
+                raise TimeoutError(
+                    f"waiting for encrypted push nonce {self._session.recv_nonce} "
+                    f"before command ack nonce {command_ack_nonce}"
+                )
+            self._flush_pending_encrypted_pushes()
+            await asyncio.sleep(0.001)
 
     def _parse_order_response(self, msg: dict) -> OrderAck:
         msg_type = msg.get("type")
@@ -686,11 +903,11 @@ class GodarkClient:
         if msg_type == "ack":
             if not msg.get("success"):
                 raw_code = msg.get("error_code")
-                numeric = _coerce_numeric_error_code(raw_code)
-                if numeric is not None:
-                    raise make_order_error_from_code(numeric)
                 raise make_order_error_from_json(
-                    msg.get("error", "order rejected"),
+                    msg.get("reject_text")
+                    or msg.get("msg")
+                    or msg.get("error")
+                    or msg.get("message"),
                     str(raw_code) if raw_code is not None else None,
                 )
             return OrderAck(
@@ -704,24 +921,100 @@ class GodarkClient:
 
         raise OrderError(f"Unexpected response type: {msg_type}")
 
-    def _decrypt_ack_push(self, msg: dict) -> OrderAck:
-        ct_b64 = msg.get("encrypted_body", "")
-        ct = base64.b64decode(ct_b64)
-        nonce = msg.get("nonce", 0)
-        user_uuid_bytes = self._user_uuid_bytes()
-        message_type = msg.get("message_type", "ack")
-        fencing_epoch = msg.get("fencing_epoch", 0)
+    def _parse_mass_quote_response(self, msg: dict) -> MassQuoteAck:
+        msg_type = msg.get("type")
+        if msg_type == "error":
+            raise OrderError(msg.get("message", "unknown error"))
+        if msg_type != "encrypted_push":
+            raise OrderError(f"Unexpected mass quote response type: {msg_type}")
 
-        aad = _proto.build_response_header_aad(
-            user_uuid=user_uuid_bytes,
-            message_type_str=message_type,
-            body_length=len(ct),
-            nonce=nonce,
-            fencing_epoch=fencing_epoch,
+        plaintext = self._decrypt_push_body(msg, "mass_quote_ack")
+
+        parsed = _proto.parse_mass_quote_ack(plaintext)
+        if parsed.get("type") != "mass_quote_ack":
+            raise OrderError(f"Expected mass_quote_ack, got {parsed.get('type')}")
+
+        results = [
+            MassQuoteLegResult(
+                leg_index=r["leg_index"],
+                status=r["status"],
+                cancelled_order_id=(
+                    str(r["cancelled_order_id"]) if r["cancelled_order_id"] else None
+                ),
+                new_order_id=str(r["new_order_id"]) if r["new_order_id"] else None,
+                error_code=r["error_code"],
+                fill_count=r.get("fill_count", 0),
+            )
+            for r in parsed.get("results", [])
+        ]
+        success = bool(results) and all(r.status != "failed" for r in results)
+        return MassQuoteAck(
+            success=success,
+            sequence=str(parsed.get("sequence", "")),
+            results=results,
         )
 
+    def _parse_batch_cancel_response(self, msg: dict) -> BatchCancelAck:
+        msg_type = msg.get("type")
+        if msg_type == "error":
+            raise OrderError(msg.get("message", "unknown error"))
+        if msg_type != "encrypted_push":
+            raise OrderError(f"Unexpected batch cancel response type: {msg_type}")
+
+        plaintext = self._decrypt_push_body(msg, "batch_cancel_ack")
+
+        parsed = _proto.parse_batch_cancel_ack(plaintext)
+        if parsed.get("type") != "batch_cancel_ack":
+            raise OrderError(f"Expected batch_cancel_ack, got {parsed.get('type')}")
+
+        results = [
+            BatchCancelLegResult(
+                order_id=str(r["order_id"]),
+                cancelled=r["cancelled"],
+                error_code=r["error_code"],
+            )
+            for r in parsed.get("results", [])
+        ]
+        success = bool(results) and all(r.cancelled for r in results)
+        return BatchCancelAck(
+            success=success,
+            sequence=str(parsed.get("sequence", "")),
+            results=results,
+        )
+
+    def _parse_batch_modify_response(self, msg: dict) -> BatchModifyAck:
+        msg_type = msg.get("type")
+        if msg_type == "error":
+            raise OrderError(msg.get("message", "unknown error"))
+        if msg_type != "encrypted_push":
+            raise OrderError(f"Unexpected batch modify response type: {msg_type}")
+
+        plaintext = self._decrypt_push_body(msg, "batch_modify_ack")
+
+        parsed = _proto.parse_batch_modify_ack(plaintext)
+        if parsed.get("type") != "batch_modify_ack":
+            raise OrderError(f"Expected batch_modify_ack, got {parsed.get('type')}")
+
+        results = [
+            BatchModifyLegResult(
+                order_id=str(r["order_id"]),
+                modified=r["modified"],
+                error_code=r["error_code"],
+            )
+            for r in parsed.get("results", [])
+        ]
+        success = bool(results) and all(r.modified for r in results)
+        return BatchModifyAck(
+            success=success,
+            sequence=str(parsed.get("sequence", "")),
+            results=results,
+        )
+
+    def _decrypt_ack_push(self, msg: dict) -> OrderAck:
+        if msg.get("_decrypt_error"):
+            raise EncryptionError(f"Failed to decrypt ack: {msg['_decrypt_error']}")
         try:
-            plaintext = self._session.decrypt_push(nonce, aad, ct)
+            plaintext = self._decrypt_push_body(msg, "ack")
         except Exception as e:
             raise EncryptionError(f"Failed to decrypt ack: {e}") from e
 
@@ -731,12 +1024,9 @@ class GodarkClient:
 
         if not ack_dict.get("success"):
             raw_code = ack_dict.get("error_code")
-            numeric = _coerce_numeric_error_code(raw_code)
-            if numeric is not None:
-                raise make_order_error_from_code(numeric)
             ec = raw_code if raw_code is not None else ""
             raise make_order_error_from_json(
-                "order rejected",
+                ack_dict.get("reject_text"),
                 str(ec) if ec != "" else None,
             )
 
@@ -746,20 +1036,82 @@ class GodarkClient:
             sequence=str(ack_dict.get("sequence", "")),
         )
 
+    def _decrypt_push_body(self, msg: dict, default_message_type: str) -> bytes:
+        """Decrypt a Noise-bound response, retaining pre-decrypted ordered acks."""
+        cached = msg.get("_decrypted_plaintext")
+        if isinstance(cached, bytes):
+            return cached
+        ct = base64.b64decode(msg.get("encrypted_body", ""))
+        nonce = int(msg.get("nonce", 0))
+        aad = _proto.build_response_header_aad(
+            user_uuid=self._user_uuid_bytes(),
+            message_type_str=msg.get("message_type", default_message_type),
+            body_length=len(ct),
+            nonce=nonce,
+            fencing_epoch=msg.get("fencing_epoch", 0),
+            correlation_id=_proto.response_correlation_id_bytes(msg.get("correlation_id")),
+            session_seq=int(msg.get("session_seq") or 0),
+            conn_id=int(msg.get("conn_id") or self._conn_id),
+        )
+        return self._session.decrypt_push(nonce, aad, ct)
+
     # ------------------------------------------------------------------
     # Internals: push message handlers
     # ------------------------------------------------------------------
 
     def _handle_encrypted_push(self, msg: dict) -> None:
-        ct_b64 = msg.get("encrypted_body", "")
-        ct = base64.b64decode(ct_b64)
-        nonce = msg.get("nonce", 0)
-        user_uuid_bytes = self._user_uuid_bytes()
-        message_type = msg.get("message_type", "")
-        fencing_epoch = msg.get("fencing_epoch", 0)
+        """Order encrypted frames by the Noise receive counter before decrypting."""
+        try:
+            nonce = int(msg.get("nonce", 0))
+        except (TypeError, ValueError):
+            logger.warning("Dropping encrypted push with invalid nonce=%r", msg.get("nonce"))
+            return
+        if not STAMPED_NONCE_PUSH:
+            # Legacy path: pushes are keyed by the sequential Noise receive counter, so deliver
+            # strictly in nonce order and buffer any that arrive early.
+            expected = self._session.recv_nonce
+            if nonce > expected:
+                self._pending_encrypted_by_nonce[nonce] = msg
+                return
+            if nonce < expected:
+                logger.warning(
+                    "Dropping stale encrypted push nonce=%d expected=%d", nonce, expected
+                )
+                return
+        # Stamped-nonce mode: decrypt each frame in arrival order at its own stamped nonce; skips
+        # are tolerated, so no reorder buffer is needed.
+        self._dispatch_encrypted_push_in_order(msg)
+        self._flush_pending_encrypted_pushes()
 
-        if message_type == "ack":
-            self._transport.resolve_command(msg)
+    def _flush_pending_encrypted_pushes(self) -> None:
+        while (
+            msg := self._pending_encrypted_by_nonce.pop(self._session.recv_nonce, None)
+        ) is not None:
+            self._dispatch_encrypted_push_in_order(msg)
+
+    def _dispatch_encrypted_push_in_order(self, msg: dict) -> None:
+        message_type = msg.get("message_type", "")
+
+        if message_type in ("ack", "mass_quote_ack", "batch_cancel_ack", "batch_modify_ack"):
+            # Only resolve the in-flight command if this ack is the kind it is
+            # waiting for. A mass_quote awaits "mass_quote_ack"; an async order
+            # "ack" pushed while it is in flight must not resolve it early
+            # (that surfaced as "Expected mass_quote_ack, got ack"). With
+            # concurrent commands the expected type is looked up by the ack's
+            # correlation id; when absent we fall back to the single-slot field
+            # and finally to legacy resolve-any.
+            corr_key = self._transport._normalize_correlation_key(msg.get("correlation_id"))
+            expected = self._expected_ack_by_correlation.get(corr_key) if corr_key else None
+            if expected is None:
+                expected = self._inflight_response_type
+            if expected is None or message_type == expected:
+                try:
+                    # Decrypt before resolving the waiter: a later push must
+                    # never consume this transport nonce first.
+                    msg["_decrypted_plaintext"] = self._decrypt_push_body(msg, message_type)
+                except Exception as e:
+                    msg["_decrypt_error"] = str(e)
+                self._transport.resolve_command(msg)
             return
 
         # Skip push types we don't have an AAD enum value for. The server
@@ -771,16 +1123,8 @@ class GodarkClient:
             logger.debug("Ignoring unknown encrypted push message_type=%r", message_type)
             return
 
-        aad = _proto.build_response_header_aad(
-            user_uuid=user_uuid_bytes,
-            message_type_str=message_type,
-            body_length=len(ct),
-            nonce=nonce,
-            fencing_epoch=fencing_epoch,
-        )
-
         try:
-            plaintext = self._session.decrypt_push(nonce, aad, ct)
+            plaintext = self._decrypt_push_body(msg, message_type)
         except Exception as e:
             err = EncryptionError(f"Failed to decrypt push: {e}")
             err.__cause__ = e
@@ -802,6 +1146,7 @@ class GodarkClient:
     def _dispatch_sequencer_push(self, parsed: _proto.SequencerPush) -> None:
         """Route decrypted ``SequencerToEdgeMessage`` inner variants to queues + callbacks."""
         if isinstance(parsed, OrderUpdate):
+            self._observe_order_update(parsed)
             self._bounded_put(self._order_queue, parsed)
             for cb in self._order_callbacks:
                 with contextlib.suppress(Exception):
@@ -863,15 +1208,93 @@ class GodarkClient:
                 parsed.oneof_field,
             )
 
+    @staticmethod
+    def _is_terminal_place_update(update: OrderUpdate) -> bool:
+        return update.update_type in {
+            OrderUpdateType.OPEN,
+            OrderUpdateType.REJECTED,
+            OrderUpdateType.FILLED,
+            OrderUpdateType.PARTIALLY_FILLED,
+            OrderUpdateType.CANCELLED,
+        } or update.status in {
+            OrderStatus.PARTIALLY_FILLED,
+            OrderStatus.REJECTED,
+            OrderStatus.FILLED,
+            OrderStatus.CANCELLED,
+        }
+
+    def _register_place_outcome_waiter(self) -> dict[str, Any]:
+        loop = asyncio.get_running_loop()
+        waiter: dict[str, Any] = {
+            "order_id": None,
+            "future": loop.create_future(),
+        }
+        self._place_outcome_waiters.append(waiter)
+        return waiter
+
+    def _cancel_place_outcome_waiter(self, waiter: dict[str, Any] | None) -> None:
+        if waiter is None:
+            return
+        with contextlib.suppress(ValueError):
+            self._place_outcome_waiters.remove(waiter)
+        future = waiter["future"]
+        if not future.done():
+            future.cancel()
+        elif not future.cancelled():
+            with contextlib.suppress(BaseException):
+                future.exception()
+
+    async def _await_place_outcome(self, order_id: str, waiter: dict[str, Any]) -> OrderUpdate:
+        waiter["order_id"] = order_id
+        buffered = next(
+            (u for u in self._recent_terminal_updates if u.order_id == order_id),
+            None,
+        )
+        if buffered is not None and not waiter["future"].done():
+            waiter["future"].set_result(buffered)
+            self._recent_terminal_updates.remove(buffered)
+        try:
+            return await asyncio.wait_for(
+                waiter["future"], timeout=self._place_order_terminal_timeout
+            )
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                "place_order timed out waiting for terminal update after "
+                f"{self._place_order_terminal_timeout:g}s"
+            ) from exc
+        finally:
+            with contextlib.suppress(ValueError):
+                self._place_outcome_waiters.remove(waiter)
+
+    def _clear_place_outcomes(self, error: BaseException) -> None:
+        waiters, self._place_outcome_waiters = self._place_outcome_waiters, []
+        self._recent_terminal_updates.clear()
+        for waiter in waiters:
+            future = waiter["future"]
+            if not future.done():
+                future.set_exception(type(error)(str(error)))
+
+    def _observe_order_update(self, update: OrderUpdate) -> None:
+        if not self._is_terminal_place_update(update):
+            return
+        for waiter in self._place_outcome_waiters:
+            if waiter["order_id"] == update.order_id and not waiter["future"].done():
+                waiter["future"].set_result(update)
+                return
+        self._recent_terminal_updates.append(update)
+        if len(self._recent_terminal_updates) > 64:
+            self._recent_terminal_updates.pop(0)
+
     # ------------------------------------------------------------------
     # Internals: reconnect & rekey
     # ------------------------------------------------------------------
 
     async def _handle_rekey(self, msg: dict) -> None:
-        logger.info("Rekey required, re-negotiating ECDH session")
+        logger.info("Rekey required, re-negotiating Noise XK session")
         try:
             self._session.reset()
-            await self._setup_ecdh_session()
+            self._pending_encrypted_by_nonce.clear()
+            await self._setup_noise_session()
         except Exception as e:
             if isinstance(e, SessionError):
                 err: SessionError = e
@@ -883,6 +1306,8 @@ class GodarkClient:
 
     def _on_transport_disconnect(self) -> None:
         self._connected = False
+        self._pending_encrypted_by_nonce.clear()
+        self._clear_place_outcomes(ConnectionError("Disconnected before book confirmation"))
         if self._intentional_close or not self._auto_reconnect:
             return
         self._reconnect_task = asyncio.create_task(self._reconnect_loop())
@@ -921,7 +1346,7 @@ class GodarkClient:
         if self._user_uuid is None:
             raise ConnectionError("Not authenticated")
         if not self._session.is_established:
-            raise SessionError("ECDH session not established")
+            raise SessionError("Noise XK session not established")
 
     @staticmethod
     def _parse_user_uuid_bytes(msg: dict) -> bytes:
