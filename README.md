@@ -99,7 +99,7 @@ bash scripts/package.sh
 | Script | Purpose |
 |--------|---------|
 | `examples/quickstart.py` | Minimal connect → LIMIT sell far from touch → cancel |
-| `examples/full_trader_example.py` | Callbacks for pushes, place / modify / cancel, session summary |
+| `examples/full_trader_example.py` | Callbacks for pushes, place / modify / cancel, mass-quote / batch-cancel, session summary |
 
 Order-type support in this MM distribution is limited to **`MARKET`** and **`LIMIT`**.
 

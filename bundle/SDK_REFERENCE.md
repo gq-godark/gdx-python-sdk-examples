@@ -4,8 +4,9 @@ This reference describes the API and workflow used by the market-maker-facing
 distribution in this repository.
 
 The MM examples use WebSocket encrypted trading via `godark.GodarkClient`.
-REST and standalone market-data examples are intentionally excluded from this
-distribution.
+Encrypted REST trading is not supported — all order flow (place / modify /
+cancel / mass-quote) runs over the Noise XK WebSocket client. Standalone
+market-data examples are excluded from this distribution.
 
 Order placement support in this MM distribution is limited to `MARKET` and
 `LIMIT`.
@@ -183,7 +184,7 @@ All SDK exceptions inherit from `godark.GodarkError`:
 | File | Purpose |
 |------|---------|
 | `examples/quickstart.py` | Minimal connect, place, cancel |
-| `examples/full_trader_example.py` | Reference bot flow with callbacks and order lifecycle |
+| `examples/full_trader_example.py` | Reference bot flow: callbacks, place / modify / cancel, mass-quote / batch-cancel |
 
 ## pip integration
 
