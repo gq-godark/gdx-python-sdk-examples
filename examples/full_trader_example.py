@@ -91,6 +91,11 @@ async def main() -> int:
             flush=True,
         )
 
+    # BTC-USDC-PERP is symbol_id 1; capture its live mark from snapshots so the
+    # mass-quote ladder/cross prices below can anchor to the real touch instead
+    # of a fixed constant.
+    last_mark: dict[str, float] = {}
+
     def on_snap(s: PositionsSnapshot) -> None:
         bump("positions_snapshot")
         print(
@@ -98,6 +103,11 @@ async def main() -> int:
             flush=True,
         )
         for row in s.rows:
+            if row.symbol_id == 1 and row.mark_price:
+                try:
+                    last_mark["BTC"] = float(row.mark_price)
+                except (TypeError, ValueError):
+                    pass
             mark = row.mark_price or "—"
             print(
                 f"  ↳ symbol={row.symbol_id}  side={row.side}  "
@@ -242,9 +252,11 @@ async def main() -> int:
     # cross is rejected as "failed" so the batch fuses into one MPC round. Pass
     # post_only=False for the relaxed path, where a crossing leg takes liquidity
     # up to its limit and rests the remainder (reported per leg as fill_count).
-    # `GDX_BASE` anchors the ladder/cross near the live mark (default 64000).
-    base = float(os.environ.get("GDX_BASE", "64000"))
-    print("Mass-quoting a 3-level BUY ladder (post-only)...")
+    # Anchor the ladder/cross to the live BTC mark captured from the snapshot so
+    # the crossing demo below is deterministic regardless of current price. Fall
+    # back to GDX_BASE (default 64000) only if no mark was seen yet.
+    base = last_mark.get("BTC") or float(os.environ.get("GDX_BASE", "64000"))
+    print(f"Mass-quoting a 3-level BUY ladder (post-only), base={base:.2f}...")
     ladder = [
         {"side": Side.BUY, "price": round(base * (1 - 0.003), 1), "quantity": 0.02},
         {"side": Side.BUY, "price": round(base * (1 - 0.006), 1), "quantity": 0.02},
@@ -282,8 +294,11 @@ async def main() -> int:
         await asyncio.sleep(0.5)
         drain_orders("after BATCH CANCEL")
 
-    # Demonstrate the batch-level post_only flag on a crossing leg.
-    cross_px = round(base * 1.02, 1)
+    # Demonstrate the batch-level post_only flag on a crossing leg. Price a BUY
+    # ~5% above the live mark: aggressive enough to cross the resting ask, yet
+    # within the exchange's 10%-of-oracle limit. Anchored to the live mark, this
+    # makes the post_only=true (reject) vs false (fill) contrast deterministic.
+    cross_px = round(base * 1.05, 1)
     # post_only=True: a crossing leg is rejected (would-cross, error_code 2018).
     print("Mass-quoting a crossing BUY with post_only=True (expect rejected/2018)...")
     try:
