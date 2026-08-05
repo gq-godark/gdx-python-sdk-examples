@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import uuid
 from typing import Any, TypeAlias
 
 _GENERATED_DIR = os.path.join(os.path.dirname(__file__), "_generated")
@@ -11,6 +12,7 @@ if _GENERATED_DIR not in sys.path:
     sys.path.insert(0, _GENERATED_DIR)
 
 from gdx.edge.v1 import edge_pb2  # noqa: E402
+from gdx.health.v1 import health_pb2  # noqa: E402
 from gdx.sequencer.v1 import sequencer_pb2  # noqa: E402
 
 from . import _identity  # noqa: E402
@@ -47,10 +49,34 @@ from .types import (  # noqa: E402
 
 
 def _correlation_id_to_int(raw: bytes) -> int:
-    """Convert a 16-byte correlation ID (UUID bytes) to an integer."""
+    """Convert little-endian sequencer correlation bytes to an integer."""
     if not raw:
         return 0
-    return int.from_bytes(raw, "big")
+    return int.from_bytes(raw, "little")
+
+
+def correlation_id_body_bytes(canonical: bytes | None) -> bytes:
+    """Convert canonical big-endian u128 bytes to sequencer-body little-endian."""
+    return bytes(reversed(canonical)) if canonical else b""
+
+
+def response_correlation_id_bytes(value: Any) -> bytes:
+    """Parse an edge JSON correlation id into canonical 16-byte big-endian bytes."""
+    if value is None or value == 0 or value == "":
+        return b""
+    try:
+        if isinstance(value, int):
+            parsed = value
+        else:
+            raw = str(value).strip()
+            if "-" in raw:
+                return uuid.UUID(raw).bytes
+            parsed = int(raw, 10 if raw.isdigit() else 16)
+        if parsed <= 0 or parsed.bit_length() > 128:
+            return b""
+        return parsed.to_bytes(16, "big")
+    except (ValueError, TypeError, OverflowError):
+        return b""
 
 
 def _uuid_bytes_to_str(raw: bytes) -> str:
@@ -58,6 +84,12 @@ def _uuid_bytes_to_str(raw: bytes) -> str:
     if len(raw) == _identity.USER_UUID_LEN:
         return _identity.bytes_to_uuid(raw)
     return "00000000-0000-0000-0000-000000000000"
+
+
+# Maximum legs / ids accepted in a single mass-quote, batch-cancel, or
+# batch-modify request. The node fans batches out at ~constant MPC cost only up
+# to this bound; larger batches are rejected client-side before hitting the wire.
+_MAX_BATCH_LEGS = 20
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +134,7 @@ def build_place_order_proto(
     if expiry_time is not None:
         place.expiry_time = expiry_time
     if correlation_id_bytes is not None:
-        place.correlation_id = correlation_id_bytes
+        place.correlation_id = correlation_id_body_bytes(correlation_id_bytes)
 
     req = sequencer_pb2.EdgeSequencerRequest(place=place)
     return req.SerializeToString()
@@ -119,7 +151,7 @@ def build_cancel_order_proto(
         order_id=order_id,
         user_commitment=b"\x00" * 32,
         symbol_id=symbol_id,
-        correlation_id=correlation_id_bytes,
+        correlation_id=correlation_id_body_bytes(correlation_id_bytes),
     )
     req = sequencer_pb2.EdgeSequencerRequest(cancel=cancel)
     return req.SerializeToString()
@@ -138,7 +170,7 @@ def build_modify_order_proto(
         order_id=order_id,
         user_commitment=b"",
         symbol_id=symbol_id,
-        correlation_id=correlation_id_bytes,
+        correlation_id=correlation_id_body_bytes(correlation_id_bytes),
         user_uuid=user_uuid,
     )
     if new_price is not None:
@@ -162,9 +194,150 @@ def build_update_leverage_proto(
         user_uuid=user_uuid,
         symbol_id=symbol_id,
         leverage=lev,
-        correlation_id=correlation_id_bytes,
+        correlation_id=correlation_id_body_bytes(correlation_id_bytes),
     )
     req = sequencer_pb2.EdgeSequencerRequest(update_leverage=update)
+    return req.SerializeToString()
+
+
+def build_mass_quote_proto(
+    symbol_id: int,
+    user_uuid: bytes,
+    legs: list[dict[str, Any]],
+    correlation_id_bytes: bytes | None = None,
+    leverage: int = 1,
+    post_only: bool | None = None,
+) -> bytes:
+    """Build a MassQuoteInput wrapped in EdgeSequencerRequest, return serialized bytes.
+
+    Each leg dict supports: ``side`` (str/Side), ``price`` (float), ``quantity``
+    (float), ``cancel_order_id`` (int|None, 0/None = pure place), ``time_in_force``
+    (str, default GTC), ``expiry_time`` (int|None), ``correlation_id`` (bytes|None).
+
+    ``post_only`` is the batch-level flag: ``None`` omits it (node defaults to
+    post-only); ``False`` enables the relaxed path where a crossing leg takes
+    liquidity up to its limit and rests the remainder.
+
+    Raises ``ValueError`` if ``legs`` is empty or has more than 20 entries.
+    """
+    if not legs:
+        raise ValueError("mass quote requires at least one leg")
+    if len(legs) > _MAX_BATCH_LEGS:
+        raise ValueError(f"mass quote accepts at most {_MAX_BATCH_LEGS} legs, got {len(legs)}")
+    mq = sequencer_pb2.MassQuoteInput(
+        symbol_id=symbol_id,
+        user_commitment=b"",
+        user_uuid=user_uuid,
+        leverage=leverage,
+    )
+    if correlation_id_bytes is not None:
+        mq.correlation_id = correlation_id_body_bytes(correlation_id_bytes)
+    if post_only is not None:
+        mq.post_only = post_only
+
+    for leg in legs:
+        side = leg["side"]
+        tif = leg.get("time_in_force", "GTC")
+        pb_leg = mq.legs.add()
+        pb_leg.side = _SIDE_TO_PROTO[side if isinstance(side, str) else side.value]
+        pb_leg.price = float(leg["price"])
+        pb_leg.quantity = float(leg["quantity"])
+        pb_leg.time_in_force = _TIME_IN_FORCE_TO_PROTO[tif if isinstance(tif, str) else tif.value]
+        cancel_id = leg.get("cancel_order_id")
+        # cancel_order_id is plain uint64; 0 means "pure place" (no cancel target).
+        pb_leg.cancel_order_id = int(cancel_id) if cancel_id else 0
+        if leg.get("expiry_time") is not None:
+            pb_leg.expiry_time = int(leg["expiry_time"])
+        # Each leg becomes its own order, so it carries a unique 16-byte
+        # correlation_id (the wire requires exactly 16 bytes per leg). Callers
+        # may supply one explicitly; otherwise generate a fresh one.
+        leg_cid = leg.get("correlation_id")
+        pb_leg.correlation_id = leg_cid if leg_cid else uuid.uuid4().bytes
+
+    req = sequencer_pb2.EdgeSequencerRequest(mass_quote=mq)
+    return req.SerializeToString()
+
+
+def build_batch_cancel_proto(
+    symbol_id: int,
+    user_uuid: bytes,
+    order_ids: list[int],
+    correlation_id_bytes: bytes | None = None,
+) -> bytes:
+    """Build a BatchCancelInput wrapped in EdgeSequencerRequest, return serialized bytes.
+
+    ``order_ids`` is a list of resting order ids (plain uint64) to cancel in one
+    fanned-out batch. Up to 20 ids per request, single symbol. Cancels are pure
+    index removals (no MPC comparison), so the whole batch costs zero online rounds.
+
+    Raises ``ValueError`` if ``order_ids`` is empty or has more than 20 entries.
+    """
+    if not order_ids:
+        raise ValueError("batch cancel requires at least one order id")
+    if len(order_ids) > _MAX_BATCH_LEGS:
+        raise ValueError(
+            f"batch cancel accepts at most {_MAX_BATCH_LEGS} ids, got {len(order_ids)}"
+        )
+    bc = sequencer_pb2.BatchCancelInput(
+        symbol_id=symbol_id,
+        user_commitment=b"",
+        user_uuid=user_uuid,
+        order_ids=[int(oid) for oid in order_ids],
+    )
+    if correlation_id_bytes is not None:
+        bc.correlation_id = correlation_id_body_bytes(correlation_id_bytes)
+
+    req = sequencer_pb2.EdgeSequencerRequest(batch_cancel=bc)
+    return req.SerializeToString()
+
+
+def build_batch_modify_proto(
+    symbol_id: int,
+    user_uuid: bytes,
+    legs: list[dict[str, Any]],
+    correlation_id_bytes: bytes | None = None,
+) -> bytes:
+    """Build a BatchModifyInput wrapped in EdgeSequencerRequest, return serialized bytes.
+
+    Each leg dict supports: ``order_id`` (int, the resting order to amend),
+    ``new_price`` (float|None) and ``new_quantity`` (float|None) — at least one
+    must be set — and an optional ``correlation_id`` (bytes). Up to 20 legs per
+    request, single symbol. Amends are post-only: a leg whose amended order would
+    cross is rejected rather than taking liquidity, keeping the batch ~constant
+    online MPC rounds.
+
+    Raises ``ValueError`` if ``legs`` is empty, has more than 20 entries, or
+    contains a leg with neither ``new_price`` nor ``new_quantity`` set (a no-op
+    amend that the node would reject).
+    """
+    if not legs:
+        raise ValueError("batch modify requires at least one leg")
+    if len(legs) > _MAX_BATCH_LEGS:
+        raise ValueError(f"batch modify accepts at most {_MAX_BATCH_LEGS} legs, got {len(legs)}")
+    for i, leg in enumerate(legs):
+        if leg.get("new_price") is None and leg.get("new_quantity") is None:
+            raise ValueError(f"batch modify leg {i} must set new_price and/or new_quantity")
+    bm = sequencer_pb2.BatchModifyInput(
+        symbol_id=symbol_id,
+        user_commitment=b"",
+        user_uuid=user_uuid,
+    )
+    if correlation_id_bytes is not None:
+        bm.correlation_id = correlation_id_body_bytes(correlation_id_bytes)
+
+    for leg in legs:
+        pb_leg = bm.legs.add()
+        pb_leg.order_id = int(leg["order_id"])
+        if leg.get("new_price") is not None:
+            pb_leg.new_price = float(leg["new_price"])
+        if leg.get("new_quantity") is not None:
+            pb_leg.new_quantity = float(leg["new_quantity"])
+        # Each leg carries a unique 16-byte correlation_id (wire requires exactly
+        # 16 bytes per leg). Callers may supply one; otherwise generate a fresh one.
+        leg_cid = leg.get("correlation_id")
+        pb_leg.correlation_id = leg_cid if leg_cid else uuid.uuid4().bytes
+
+    req = sequencer_pb2.EdgeSequencerRequest(batch_modify=bm)
     return req.SerializeToString()
 
 
@@ -175,6 +348,7 @@ def build_order_header_aad(
     nonce: int,
     body_length: int,
     correlation_id: bytes = b"",
+    conn_id: int = 0,
 ) -> bytes:
     """Create an OrderHeader proto and serialize it (used as AES-GCM AAD)."""
     header = edge_pb2.OrderHeader(
@@ -184,6 +358,7 @@ def build_order_header_aad(
         nonce=nonce,
         body_length=body_length,
         correlation_id=correlation_id,
+        conn_id=conn_id,
     )
     return header.SerializeToString()
 
@@ -194,6 +369,9 @@ def build_response_header_aad(
     body_length: int,
     nonce: int,
     fencing_epoch: int = 0,
+    correlation_id: bytes = b"",
+    session_seq: int = 0,
+    conn_id: int = 0,
 ) -> bytes:
     """Create a ResponseHeader proto and serialize it (used as AES-GCM AAD)."""
     header = edge_pb2.ResponseHeader(
@@ -202,6 +380,9 @@ def build_response_header_aad(
         body_length=body_length,
         nonce=nonce,
         fencing_epoch=fencing_epoch,
+        correlation_id=correlation_id,
+        session_seq=session_seq,
+        conn_id=conn_id,
     )
     return header.SerializeToString()
 
@@ -229,6 +410,8 @@ def parse_node_response(data: bytes) -> dict[str, Any]:
         }
         if ack.HasField("error_code"):
             result["error_code"] = ack.error_code
+        if ack.HasField("reject_text"):
+            result["reject_text"] = ack.reject_text
         if ack.HasField("order_status"):
             result["order_status"] = _ORDER_STATUS_FROM_PROTO.get(ack.order_status)
         if ack.HasField("node_health"):
@@ -250,6 +433,116 @@ def parse_node_response(data: bytes) -> dict[str, Any]:
         return {"type": "signing"}
     else:
         return {"type": "unknown"}
+
+
+_MASS_QUOTE_LEG_STATUS_FROM_PROTO: dict[int, str] = {
+    0: "unspecified",
+    1: "open",
+    2: "filled",
+    3: "failed",
+}
+
+
+def parse_mass_quote_ack(data: bytes) -> dict[str, Any]:
+    """Decode a NodeResponse carrying a MassQuoteAck into a plain dict.
+
+    Returns ``{"type": "mass_quote_ack", "sequence", "correlation_id",
+    "results": [{"leg_index", "cancelled_order_id", "new_order_id", "status",
+    "error_code", "fill_count"}]}``. ``cancelled_order_id`` / ``new_order_id``
+    are ``None`` when zero (no cancel target / replacement failed).
+    ``fill_count`` is the number of taker fills the leg produced in relaxed
+    (post_only=False) mode; 0 for a pure rest or a post-only leg.
+    """
+    resp = sequencer_pb2.NodeResponse()
+    resp.ParseFromString(data)
+    which = resp.WhichOneof("inner")
+    if which != "mass_quote_ack":
+        return {"type": which or "unknown"}
+
+    a = resp.mass_quote_ack
+    results: list[dict[str, Any]] = []
+    for r in a.results:
+        results.append(
+            {
+                "leg_index": r.leg_index,
+                "cancelled_order_id": r.cancelled_order_id or None,
+                "new_order_id": r.new_order_id or None,
+                "status": _MASS_QUOTE_LEG_STATUS_FROM_PROTO.get(r.status, "unknown"),
+                "error_code": r.error_code if r.HasField("error_code") else None,
+                "fill_count": r.fill_count,
+            }
+        )
+    return {
+        "type": "mass_quote_ack",
+        "node_id": a.node_id,
+        "sequence": a.sequence,
+        "correlation_id": a.correlation_id,
+        "results": results,
+    }
+
+
+def parse_batch_cancel_ack(data: bytes) -> dict[str, Any]:
+    """Decode a NodeResponse carrying a BatchCancelAck into a plain dict.
+
+    Returns ``{"type": "batch_cancel_ack", "node_id", "sequence", "correlation_id",
+    "results": [{"order_id", "cancelled", "error_code"}]}``. ``error_code`` is
+    ``None`` for a successful cancel and set (e.g. 2003 ORDER_NOT_FOUND) otherwise.
+    """
+    resp = sequencer_pb2.NodeResponse()
+    resp.ParseFromString(data)
+    which = resp.WhichOneof("inner")
+    if which != "batch_cancel_ack":
+        return {"type": which or "unknown"}
+
+    a = resp.batch_cancel_ack
+    results: list[dict[str, Any]] = []
+    for r in a.results:
+        results.append(
+            {
+                "order_id": r.order_id,
+                "cancelled": r.cancelled,
+                "error_code": r.error_code if r.HasField("error_code") else None,
+            }
+        )
+    return {
+        "type": "batch_cancel_ack",
+        "node_id": a.node_id,
+        "sequence": a.sequence,
+        "correlation_id": a.correlation_id,
+        "results": results,
+    }
+
+
+def parse_batch_modify_ack(data: bytes) -> dict[str, Any]:
+    """Decode a NodeResponse carrying a BatchModifyAck into a plain dict.
+
+    Returns ``{"type": "batch_modify_ack", "node_id", "sequence", "correlation_id",
+    "results": [{"order_id", "modified", "error_code"}]}``. ``error_code`` is
+    ``None`` for a successful amend and set otherwise (2003 not-found, 2018 crossed).
+    """
+    resp = sequencer_pb2.NodeResponse()
+    resp.ParseFromString(data)
+    which = resp.WhichOneof("inner")
+    if which != "batch_modify_ack":
+        return {"type": which or "unknown"}
+
+    a = resp.batch_modify_ack
+    results: list[dict[str, Any]] = []
+    for r in a.results:
+        results.append(
+            {
+                "order_id": r.order_id,
+                "modified": r.modified,
+                "error_code": r.error_code if r.HasField("error_code") else None,
+            }
+        )
+    return {
+        "type": "batch_modify_ack",
+        "node_id": a.node_id,
+        "sequence": a.sequence,
+        "correlation_id": a.correlation_id,
+        "results": results,
+    }
 
 
 def parse_order_update_proto(data: bytes) -> OrderUpdate:
@@ -285,6 +578,7 @@ def parse_order_update_proto(data: bytes) -> OrderUpdate:
         cum_fill=msg.cum_fill,
         cancel_reason=cancel_reason,
         reject_reason=reject_reason,
+        msg=msg.msg if msg.HasField("msg") else None,
         correlation_id=_correlation_id_to_int(msg.correlation_id),
         timestamp=int(msg.timestamp),
         leverage=int(msg.leverage),
@@ -371,16 +665,18 @@ def parse_positions_snapshot_proto(msg: sequencer_pb2.PositionsSnapshot) -> Posi
     )
 
 
-def parse_system_health_proto(msg: sequencer_pb2.SystemHealthMessage) -> SystemHealthUpdate:
+def parse_system_health_proto(msg: health_pb2.HealthReport) -> SystemHealthUpdate:
+    """Map the current health package report to the legacy aggregate SDK update."""
+    state = int(msg.state)
     return SystemHealthUpdate(
-        total_nodes=int(msg.total_nodes),
-        accepting_orders=bool(msg.accepting_orders),
-        ready=int(msg.ready),
-        degraded=int(msg.degraded),
-        exhausted=int(msg.exhausted),
-        warming=int(msg.warming),
-        draining=int(msg.draining),
-        waiting=int(msg.waiting),
+        total_nodes=1,
+        accepting_orders=bool(msg.serving),
+        ready=int(state == health_pb2.HEALTH_STATE_READY),
+        degraded=int(state == health_pb2.HEALTH_STATE_DEGRADED),
+        exhausted=0,
+        warming=int(state == health_pb2.HEALTH_STATE_WARMING),
+        draining=int(state == health_pb2.HEALTH_STATE_DRAINING),
+        waiting=int(state == health_pb2.HEALTH_STATE_WAITING),
     )
 
 
@@ -398,8 +694,8 @@ def parse_margin_alert_proto(msg: sequencer_pb2.MarginAlertMessage) -> MarginAle
         symbol_id=int(msg.symbol_id),
         tier=int(msg.tier),
         margin_ratio_bps=int(msg.margin_ratio_bps),
-        mark_price_bps=int(msg.mark_price_bps),
-        liquidation_price_bps=int(msg.liquidation_price_bps),
+        mark_price=msg.mark_price,
+        liquidation_price=msg.liquidation_price,
         ts=int(msg.ts),
         state_version=int(msg.state_version),
         recovered=bool(msg.recovered),
@@ -454,8 +750,8 @@ def parse_sequencer_to_edge_message(data: bytes) -> SequencerPush:
         return parse_position_update_proto(msg.position_update.SerializeToString())
     if which == "positions_snapshot":
         return parse_positions_snapshot_proto(msg.positions_snapshot)
-    if which == "system_health":
-        return parse_system_health_proto(msg.system_health)
+    if which == "health_report":
+        return parse_system_health_proto(msg.health_report)
     if which == "settlement_update":
         return parse_settlement_update_proto(msg.settlement_update)
     if which == "funding_rate_update":

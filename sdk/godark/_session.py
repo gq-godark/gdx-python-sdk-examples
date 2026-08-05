@@ -1,19 +1,24 @@
-"""ECDH session lifecycle for encrypted trading with gdx-edge sequencer."""
+"""Noise XK session lifecycle for encrypted trading with gdx-edge sequencer."""
 
-import base64
+import os
 
-from . import _crypto
+from ._noise import HASH_LEN, TAG_LEN, NoiseTransport, decrypt_bound, encrypt_bound
+
+# When enabled (the default), encrypted pushes are decrypted at the server-stamped wire nonce
+# rather than the strictly-sequential Noise receive counter, tolerating relay-dropped frames.
+# The edge stamps the true nonce on every push, so the sequential assumption caused later pushes to
+# stall forever after any skipped frame (command timeout while the order actually succeeded).
+# Disable with GDX_STAMPED_NONCE_PUSH=false to restore the legacy strictly-sequential path.
+STAMPED_NONCE_PUSH = os.environ.get("GDX_STAMPED_NONCE_PUSH", "true").lower() != "false"
 
 
 class CryptoSession:
-    """Manages a single ECDH session with the sequencer."""
+    """Manages a single completed Noise XK transport with the sequencer."""
 
     def __init__(self):
-        self._private_key: _crypto.X25519PrivateKey | None = None
-        self._local_public: bytes | None = None
-        self._session_key: bytes | None = None
-        self._session_id: int | None = None
-        self._nonce: _crypto.NonceTracker = _crypto.NonceTracker()
+        self._transport: NoiseTransport | None = None
+        self._conn_id: int | None = None
+        self._send_nonce = 0
         self._established = False
 
     @property
@@ -21,42 +26,28 @@ class CryptoSession:
         return self._established
 
     @property
-    def session_id(self) -> int | None:
-        return self._session_id
+    def conn_id(self) -> int | None:
+        return self._conn_id
 
     @property
     def next_nonce(self) -> int:
         """Peek at the next send nonce counter without advancing it."""
-        return self._nonce.peek_next()
+        return self._send_nonce
 
-    def generate_keypair(self) -> str:
-        """Generate ephemeral X25519 keypair. Returns base64-encoded public key string."""
-        self._private_key, self._local_public = _crypto.generate_ephemeral_keypair()
-        self._established = False
-        self._session_key = None
-        self._session_id = None
-        self._nonce.reset()
-        return base64.b64encode(self._local_public).decode("ascii")
+    @property
+    def recv_nonce(self) -> int:
+        """Next Noise receive counter; used for ordered encrypted pushes."""
+        return self._transport.recv_nonce if self._transport is not None else 0
 
-    def establish(self, sequencer_pubkey_b64: str, session_id: int) -> None:
-        """
-        Complete ECDH handshake: derive session key from sequencer's public key.
-        Called after receiving session_established from the server.
-        """
-        if self._private_key is None or self._local_public is None:
-            raise RuntimeError("Must call generate_keypair() before establish()")
-
-        remote_public = base64.b64decode(sequencer_pubkey_b64)
-        if len(remote_public) != 32:
-            raise ValueError(f"Sequencer public key must be 32 bytes, got {len(remote_public)}")
-
-        self._session_key = _crypto.derive_session_key(
-            self._private_key, self._local_public, remote_public
-        )
-        self._session_id = session_id
-        self._nonce.reset()
+    def establish(self, transport: NoiseTransport, conn_id: int) -> None:
+        """Attach a completed Noise transport for the authenticated connection."""
+        if conn_id == 0:
+            raise ValueError("conn_id must be non-zero")
+        self.reset()
+        self._transport = transport
+        self._conn_id = conn_id
+        self._send_nonce = 0
         self._established = True
-        self._private_key = None
 
     def encrypt_order(self, aad: bytes, plaintext: bytes) -> tuple[int, bytes]:
         """
@@ -65,8 +56,16 @@ class CryptoSession:
         """
         if not self._established:
             raise RuntimeError("Session not established")
-        nonce_counter = self._nonce.advance()
-        ct = _crypto.encrypt(self._session_key, nonce_counter, self._session_id, aad, plaintext)
+        nonce_counter = self._send_nonce
+        if nonce_counter > 0xFFFFFFFF:
+            raise OverflowError("Send nonce counter exceeded u32 max")
+        self._send_nonce += 1
+        ct = encrypt_bound(self._require_transport(), aad, plaintext)
+        expected_length = HASH_LEN + len(plaintext) + TAG_LEN
+        if len(ct) != expected_length:
+            raise RuntimeError(
+                f"encrypt_order produced {len(ct)} bytes; expected {expected_length}"
+            )
         return nonce_counter, ct
 
     def decrypt_push(self, nonce_counter: int, aad: bytes, ciphertext: bytes) -> bytes:
@@ -76,15 +75,24 @@ class CryptoSession:
         """
         if not self._established:
             raise RuntimeError("Session not established")
-        pt = _crypto.decrypt(self._session_key, nonce_counter, self._session_id, aad, ciphertext)
-        self._nonce.commit_recv(nonce_counter)
-        return pt
+        stamped = nonce_counter if STAMPED_NONCE_PUSH else None
+        return decrypt_bound(self._require_transport(), aad, ciphertext, stamped)
+
+    @staticmethod
+    def body_length_for_plaintext(plaintext_length: int) -> int:
+        """Ciphertext size of a bound-AEAD frame."""
+        return HASH_LEN + plaintext_length + TAG_LEN
 
     def reset(self) -> None:
         """Reset session state (for reconnect or rekey)."""
-        self._private_key = None
-        self._local_public = None
-        self._session_key = None
-        self._session_id = None
-        self._nonce.reset()
+        if self._transport is not None:
+            self._transport.reset()
+        self._transport = None
+        self._conn_id = None
+        self._send_nonce = 0
         self._established = False
+
+    def _require_transport(self) -> NoiseTransport:
+        if not self._established or self._transport is None:
+            raise RuntimeError("Noise XK session not established")
+        return self._transport
