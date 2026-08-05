@@ -48,6 +48,7 @@ Required keys:
 - `GODARK_API_KEY_ID`
 - `GODARK_API_SECRET`
 - `GODARK_PASSPHRASE` — required for API key-pair auth.
+- `GDX_NOISE_STATIC_PUBLIC_KEY` — required for encrypted WebSocket trading (64-hex sequencer static key). Aliases: `GDX_NOISE_STATIC_PUBKEY`, `GODARK_NOISE_STATIC_PUBLIC_KEY`.
 
 Optional:
 
@@ -98,7 +99,7 @@ bash scripts/package.sh
 | Script | Purpose |
 |--------|---------|
 | `examples/quickstart.py` | Minimal connect → LIMIT sell far from touch → cancel |
-| `examples/full_trader_example.py` | Callbacks for pushes, place / modify / cancel, session summary |
+| `examples/full_trader_example.py` | Callbacks for pushes, place / modify / cancel, mass-quote / batch-cancel, session summary |
 
 Order-type support in this MM distribution is limited to **`MARKET`** and **`LIMIT`**.
 

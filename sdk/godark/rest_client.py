@@ -1,4 +1,8 @@
-"""REST-only trading client — ``auth`` → ``session.setup`` → encrypted ``/orders`` (docs §base-urls)."""
+"""REST data client.
+
+Noise XK encrypted trading is connection-bound and therefore requires
+:class:`godark.GodarkClient` over WebSocket; encrypted REST trading is unsupported.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +15,6 @@ import uuid
 from typing import Any
 
 from . import _proto
-from ._identity import bytes_to_uuid
 from ._rest_transport import RestEnvelopeError, RestTransport
 from ._session import CryptoSession
 from ._symbols import load_default_symbol_map
@@ -61,10 +64,10 @@ def _timestamp_ns() -> int:
 
 class GodarkRestClient:
     """
-    Docs-aligned REST trading client (no WebSocket).
+    REST client for authenticated read endpoints.
 
-    Same crypto session + protobuf builders as :class:`~godark.client.GodarkClient`,
-    but uses ``POST /api/v1/auth/token``, ``POST /api/v1/session/setup``, and encrypted HTTP verbs on ``/orders``.
+    Encrypted order placement, modification, cancellation, and leverage updates
+    require the WebSocket client's per-connection Noise XK transport.
     """
 
     def __init__(
@@ -132,7 +135,6 @@ class GodarkRestClient:
         return uuid.UUID(self._user_uuid).bytes
 
     async def connect(self) -> None:
-        # JWT mint
         if self._api_key_id is not None:
             auth_data = await self._http.auth_token(
                 grant_type="client_credentials",
@@ -142,24 +144,10 @@ class GodarkRestClient:
             )
         else:
             auth_data = await self._http.auth_token(token=self._auth_token)
-
         self._bearer = auth_data.get("access_token") or auth_data.get("token")
         if not self._bearer:
             raise SessionError("auth/token missing access_token/token")
         self._user_uuid = auth_data.get("user_uuid")
-
-        # ECDH
-        client_pk_b64 = self._session.generate_keypair()
-        if not self._bearer:
-            raise SessionError("not authenticated – call connect() first")
-        sess = await self._http.session_setup(bearer=self._bearer, client_ecdh_pubkey=client_pk_b64)
-        seq_pk = sess.get("server_ecdh_pubkey") or sess.get("sequencer_ecdh_pubkey")
-        sid = sess.get("session_id")
-        if isinstance(sid, str):
-            sid = int(sid)
-        if not seq_pk or sid is None:
-            raise SessionError("session/setup missing server_ecdh_pubkey or session_id")
-        self._session.establish(str(seq_pk), int(sid))
 
     async def disconnect(self) -> None:
         try:
@@ -187,6 +175,7 @@ class GodarkRestClient:
         *,
         client_order_id: str | None = None,
     ) -> OrderAck:
+        self._raise_noise_required()
         body_length = len(plaintext) + _GCM_TAG_LEN
         nonce_counter = self._session.next_nonce
 
@@ -205,7 +194,7 @@ class GodarkRestClient:
             raise EncryptionError(f"Failed to encrypt order: {e}") from e
 
         body_b64 = base64.b64encode(ciphertext).decode("ascii")
-        corr_id_str = bytes_to_uuid(correlation_id) if len(correlation_id) == 16 else ""
+        corr_id_str = correlation_id.hex() if len(correlation_id) == 16 else ""
         header_obj: dict[str, Any] = {
             "symbol_id": symbol_id,
             "request_type": request_type,
@@ -250,6 +239,8 @@ class GodarkRestClient:
             body_length=len(ct),
             nonce=nonce,
             fencing_epoch=fencing_epoch,
+            correlation_id=_proto.response_correlation_id_bytes(msg.get("correlation_id")),
+            session_seq=int(msg.get("session_seq") or 0),
         )
         try:
             plaintext = self._session.decrypt_push(nonce, aad, ct)
@@ -344,6 +335,7 @@ class GodarkRestClient:
         return ack
 
     async def cancel_order(self, order_id: str, symbol: str = "BTC-USDC-PERP") -> OrderAck:
+        self._raise_noise_required()
         symbol_id = self._resolve_symbol(symbol)
         corr_id = _new_correlation_id()
         plaintext = _proto.build_cancel_order_proto(
@@ -366,7 +358,7 @@ class GodarkRestClient:
         )
         actual_nonce, ciphertext = self._session.encrypt_order(aad, plaintext)
         body_b64 = base64.b64encode(ciphertext).decode("ascii")
-        corr_id_str = bytes_to_uuid(corr_id) if len(corr_id) == 16 else ""
+        corr_id_str = corr_id.hex() if len(corr_id) == 16 else ""
         header_obj = {
             "symbol_id": symbol_id,
             "request_type": "cancel",
@@ -419,6 +411,7 @@ class GodarkRestClient:
         new_price: float | None = None,
         new_quantity: float | None = None,
     ) -> OrderAck:
+        self._raise_noise_required()
         symbol_id = self._resolve_symbol(symbol)
         corr_id = _new_correlation_id()
         plaintext = _proto.build_modify_order_proto(
@@ -441,7 +434,7 @@ class GodarkRestClient:
         )
         actual_nonce, ciphertext = self._session.encrypt_order(aad, plaintext)
         body_b64 = base64.b64encode(ciphertext).decode("ascii")
-        corr_id_str = bytes_to_uuid(corr_id) if len(corr_id) == 16 else ""
+        corr_id_str = corr_id.hex() if len(corr_id) == 16 else ""
         header_obj = {
             "symbol_id": symbol_id,
             "request_type": "modify",
@@ -559,6 +552,7 @@ class GodarkRestClient:
 
     async def update_leverage(self, symbol: str, leverage: int) -> OrderAck:
         """Send encrypted leverage update via ``POST /api/v1/leverage``."""
+        self._raise_noise_required()
         symbol_id = self._resolve_symbol(symbol)
         lev = max(1, int(leverage))
         corr_id = _new_correlation_id()
@@ -584,7 +578,7 @@ class GodarkRestClient:
             raise EncryptionError(f"Failed to encrypt leverage update: {e}") from e
 
         body_b64 = base64.b64encode(ciphertext).decode("ascii")
-        corr_id_str = bytes_to_uuid(corr_id) if len(corr_id) == 16 else ""
+        corr_id_str = corr_id.hex() if len(corr_id) == 16 else ""
         header_obj: dict[str, Any] = {
             "symbol_id": symbol_id,
             "request_type": "update_leverage",
@@ -600,3 +594,10 @@ class GodarkRestClient:
             body={"header": header_obj, "ciphertext": body_b64},
         )
         return self._parse_ack(raw)
+
+    @staticmethod
+    def _raise_noise_required() -> None:
+        raise SessionError(
+            "encrypted REST trading is unsupported with Noise XK; "
+            "use GodarkClient over WebSocket instead"
+        )

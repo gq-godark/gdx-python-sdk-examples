@@ -4,8 +4,9 @@ This reference describes the API and workflow used by the market-maker-facing
 distribution in this repository.
 
 The MM examples use WebSocket encrypted trading via `godark.GodarkClient`.
-REST and standalone market-data examples are intentionally excluded from this
-distribution.
+Encrypted REST trading is not supported — all order flow (place / modify /
+cancel / mass-quote) runs over the Noise XK WebSocket client. Standalone
+market-data examples are excluded from this distribution.
 
 Order placement support in this MM distribution is limited to `MARKET` and
 `LIMIT`.
@@ -36,6 +37,8 @@ The MM examples expect:
 
 - `GODARK_API_KEY_ID` (required)
 - `GODARK_API_SECRET` (required)
+- `GODARK_PASSPHRASE` (required for API key-pair auth)
+- `GDX_NOISE_STATIC_PUBLIC_KEY` (required for encrypted WebSocket trading) — 64 hex chars; aliases `GDX_NOISE_STATIC_PUBKEY`, `GODARK_NOISE_STATIC_PUBLIC_KEY`
 - `GODARK_EDGE_URL` (optional, defaults to `wss://api.godark-dex.com`)
 
 Use `.env.example` as the template for your local `.env`.
@@ -48,7 +51,7 @@ Use `.env.example` as the template for your local `.env`.
 
 | Method | Signature | Purpose |
 |--------|-----------|---------|
-| `connect` | `async def connect() -> None` | Authenticate and establish encrypted session |
+| `connect` | `async def connect() -> None` | Authenticate and establish Noise XK encrypted session |
 | `disconnect` | `async def disconnect() -> None` | Graceful disconnect |
 | `logout` | `async def logout() -> None` | Logout and disconnect |
 | `__aenter__` / `__aexit__` | `async with GodarkClient(...) as c:` | Async-context wrapper around `connect()` / `disconnect()` |
@@ -181,7 +184,7 @@ All SDK exceptions inherit from `godark.GodarkError`:
 | File | Purpose |
 |------|---------|
 | `examples/quickstart.py` | Minimal connect, place, cancel |
-| `examples/full_trader_example.py` | Reference bot flow with callbacks and order lifecycle |
+| `examples/full_trader_example.py` | Reference bot flow: callbacks, place / modify / cancel, mass-quote / batch-cancel |
 
 ## pip integration
 
