@@ -326,6 +326,23 @@ async def main() -> int:
                   f"err={r.error_code} fills={r.fill_count}", flush=True)
     except Exception as e:
         print_order_error("post_only=False mass quote rejected", e)
+    else:
+        stray_ids = [
+            int(r.new_order_id)
+            for r in mq.results
+            if r.status == "open" and r.new_order_id
+        ]
+        if stray_ids:
+            print(f"Batch-cancelling {len(stray_ids)} post_only=False remainder(s)...")
+            try:
+                bc = await client.batch_cancel(SYMBOL, stray_ids)
+                for r in bc.results:
+                    print(
+                        f"  cancel id={r.order_id}: cancelled={r.cancelled} err={r.error_code}",
+                        flush=True,
+                    )
+            except Exception as e:
+                print_order_error("post_only=False remainder cancel rejected", e)
     await asyncio.sleep(1)
     drain_orders("after post_only mass quotes")
 
