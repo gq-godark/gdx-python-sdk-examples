@@ -17,7 +17,7 @@ from typing import Any
 from . import _proto
 from ._rest_transport import RestEnvelopeError, RestTransport
 from ._session import CryptoSession
-from ._symbols import load_default_symbol_map
+from ._symbols import load_offline_symbol_map, load_symbol_map_from_edge
 from .client import _resolve_passphrase
 from .enums import OrderType, Side, TimeInForce
 from .errors import EncryptionError, OrderError, SessionError, TimeoutError
@@ -103,7 +103,8 @@ class GodarkRestClient:
             raise ValueError("provide api_key or both api_key_id and api_secret")
 
         self._rest_base = _resolve_rest_base_url(rest_base_url)
-        self._symbol_map = dict(symbol_map) if symbol_map is not None else load_default_symbol_map()
+        self._user_symbol_map = symbol_map is not None
+        self._symbol_map = dict(symbol_map) if symbol_map is not None else load_offline_symbol_map()
         self._session = CryptoSession()
         self._http = RestTransport(self._rest_base)
         self._bearer: str | None = None
@@ -135,6 +136,8 @@ class GodarkRestClient:
         return uuid.UUID(self._user_uuid).bytes
 
     async def connect(self) -> None:
+        if not self._user_symbol_map:
+            self._symbol_map = await load_symbol_map_from_edge(self._rest_base)
         if self._api_key_id is not None:
             auth_data = await self._http.auth_token(
                 grant_type="client_credentials",
