@@ -8,7 +8,7 @@ import os
 import sys
 
 from dotenv import load_dotenv, print_order_error
-from godark import GodarkClient, OrderType, Side, TimeInForce
+from godark import Environment, GodarkClient, OrderType, Side, TimeInForce
 
 SYMBOL = "BTC-USDC-PERP"
 
@@ -27,18 +27,17 @@ async def main() -> int:
         )
         return 1
 
-    base_url = (
-        os.environ.get("GODARK_EDGE_URL", "").strip()
-        or "wss://api.godark-dex.com"
-    )
+    client_kwargs: dict = {
+        "api_key_id": api_key_id,
+        "api_secret": api_secret,
+        "passphrase": passphrase,
+        "environment": Environment.TESTNET,
+    }
+    if edge := os.environ.get("GODARK_EDGE_URL", "").strip():
+        client_kwargs["base_url"] = edge
 
     try:
-        async with GodarkClient(
-            api_key_id=api_key_id,
-            api_secret=api_secret,
-            passphrase=passphrase,
-            base_url=base_url,
-        ) as client:
+        async with GodarkClient(**client_kwargs) as client:
             user = client.user_uuid or ""
             print(f"Connected as user_uuid={user}")
             try:

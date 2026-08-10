@@ -41,7 +41,13 @@ Copy `.env.example` to `.env` and set:
 - `GODARK_API_KEY_ID`
 - `GODARK_API_SECRET`
 - `GODARK_PASSPHRASE`
-- `GDX_NOISE_STATIC_PUBLIC_KEY` (64 hex chars; aliases `GDX_NOISE_STATIC_PUBKEY`, `GODARK_NOISE_STATIC_PUBLIC_KEY`)
+
+Public testnet needs only the three credential keys above — the SDK Testnet environment preset supplies the edge URL and Noise pin.
+
+Optional:
+
+- `GODARK_EDGE_URL` — override the edge URL.
+- `GDX_NOISE_STATIC_PUBLIC_KEY` — override the sequencer Noise pin (**not required for testnet**). Aliases: `GDX_NOISE_STATIC_PUBKEY`, `GODARK_NOISE_STATIC_PUBLIC_KEY`.
 
 ```bash
 cp .env.example .env
@@ -64,7 +70,6 @@ pip install wheels/godark-*.whl
 python examples/quickstart.py
 ```
 
-
 ## pip integration (your own bot)
 
 Install the wheel into your own project's virtualenv:
@@ -81,7 +86,6 @@ import os
 
 from godark import GodarkClient, OrderType, Side, TimeInForce
 
-
 async def main():
     async with GodarkClient(
         api_key_id=os.environ["GODARK_API_KEY_ID"],
@@ -97,7 +101,6 @@ async def main():
             time_in_force=TimeInForce.GTC,
         )
         await client.cancel_order(str(ack.order_id), "BTC-USDC-PERP")
-
 
 asyncio.run(main())
 ```
