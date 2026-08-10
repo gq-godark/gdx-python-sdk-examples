@@ -56,6 +56,11 @@ class RestTransport:
         r.raise_for_status()
         return _unwrap(r.json())
 
+    async def instruments_public(self) -> dict[str, Any]:
+        r = await self._client.get("/api/v1/instruments")
+        r.raise_for_status()
+        return _unwrap(r.json())
+
     async def auth_token(
         self,
         *,

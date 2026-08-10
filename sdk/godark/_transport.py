@@ -405,9 +405,7 @@ class EdgeTransport:
             else:
                 existing = self._pending_by_correlation.get(corr)
                 if existing is not None and not existing.done():
-                    existing.set_exception(
-                        RuntimeError("superseded by duplicate correlation id")
-                    )
+                    existing.set_exception(RuntimeError("superseded by duplicate correlation id"))
                 self._pending_by_correlation[corr] = fut
                 if wire_id:
                     self._pending_by_wire_id[wire_id] = fut
@@ -422,9 +420,7 @@ class EdgeTransport:
         try:
             return await asyncio.wait_for(fut, timeout=self._command_timeout)
         except asyncio.TimeoutError:
-            raise GdxTimeoutError(
-                f"Command timed out after {self._command_timeout:.0f}s"
-            ) from None
+            raise GdxTimeoutError(f"Command timed out after {self._command_timeout:.0f}s") from None
         finally:
             if corr:
                 self._pending_by_correlation.pop(corr, None)

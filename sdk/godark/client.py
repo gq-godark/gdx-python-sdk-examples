@@ -10,12 +10,13 @@ import os
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
+from enum import Enum
 from typing import Any, Literal, TypeVar
 
 from . import _identity, _proto
 from ._noise import HandshakeInitiator, pinned_sequencer_static_pub, prologue_for_user
 from ._session import STAMPED_NONCE_PUSH, CryptoSession
-from ._symbols import load_default_symbol_map
+from ._symbols import load_offline_symbol_map, load_symbol_map_from_edge
 from ._transport import EdgeTransport, TransportConfig
 from .enums import (
     _RESPONSE_MESSAGE_TYPE_TO_PROTO,
@@ -69,13 +70,56 @@ _INFLIGHT_ACK_TYPE = {
     "batch_modify": "batch_modify_ack",
 }
 
-# Production WebSocket origin (GodarkClient appends `/ws/v1`).
+# Testnet WebSocket origin (GodarkClient appends `/ws/v1`).
 _DEFAULT_EDGE_BASE_URL = "wss://api.godark-dex.com"
 
+# Devnet WebSocket origin (GodarkClient appends `/ws/v1`).
+_DEVNET_EDGE_BASE_URL = "ws://18.143.165.149:13300"
 
-def _resolve_edge_base_url(explicit: str | None) -> str:
+# Sequencer Noise XK static public keys (64 hex). These are public pins, not
+# user secrets — Testnet and Devnet use distinct sequencer keys.
+_TESTNET_NOISE_STATIC_PUBLIC_KEY_HEX = (
+    "a9fdd7f26c0de36d82811e9fe1df2509960cd5b25eef037355e209b9222bea7d"
+)
+_DEVNET_NOISE_STATIC_PUBLIC_KEY_HEX = (
+    "a6807e2f6cd04b54cc19be2fd4faea2a1239f1e2896912d91222678ab54cdd45"
+)
+
+
+class Environment(Enum):
+    """Named deployment target.
+
+    Selects the default edge URL and, when known, a baked-in sequencer Noise XK
+    public key pin. Explicit ``base_url`` / ``noise_static_public_key_hex`` and
+    the corresponding environment variables still win over these presets.
     """
-    Resolve edge base URL: constructor arg wins, then env, then production default.
+
+    TESTNET = "testnet"
+    DEVNET = "devnet"
+    LOCALNET = "localnet"
+
+    @property
+    def edge_base_url(self) -> str:
+        """Default edge base URL for this environment (host only)."""
+        if self is Environment.DEVNET:
+            return _DEVNET_EDGE_BASE_URL
+        if self is Environment.LOCALNET:
+            return "ws://127.0.0.1:4000"
+        return _DEFAULT_EDGE_BASE_URL
+
+    @property
+    def noise_static_public_key_hex(self) -> str | None:
+        """Baked-in sequencer Noise XK static public key (64 hex), when known."""
+        if self is Environment.TESTNET:
+            return _TESTNET_NOISE_STATIC_PUBLIC_KEY_HEX
+        if self is Environment.DEVNET:
+            return _DEVNET_NOISE_STATIC_PUBLIC_KEY_HEX
+        return None
+
+
+def _resolve_edge_base_url(explicit: str | None, default: str = _DEFAULT_EDGE_BASE_URL) -> str:
+    """
+    Resolve edge base URL: constructor arg wins, then env, then ``default``.
 
     Reads ``GODARK_EDGE_URL`` or ``GDX_EDGE_URL`` (first non-empty) so localnet /
     scripts can set the host without passing ``base_url`` in code.
@@ -86,7 +130,24 @@ def _resolve_edge_base_url(explicit: str | None) -> str:
         v = os.environ.get(key, "").strip()
         if v:
             return v
-    return _DEFAULT_EDGE_BASE_URL
+    return default
+
+
+def _resolve_noise_static_public_key_hex(
+    explicit: str | None, environment: Environment
+) -> str | None:
+    """Resolve Noise pin: explicit arg → env vars → environment preset."""
+    if explicit is not None and str(explicit).strip() != "":
+        return str(explicit).strip()
+    for key in (
+        "GDX_NOISE_STATIC_PUBLIC_KEY",
+        "GDX_NOISE_STATIC_PUBKEY",
+        "GODARK_NOISE_STATIC_PUBLIC_KEY",
+    ):
+        v = os.environ.get(key, "").strip()
+        if v:
+            return v
+    return environment.noise_static_public_key_hex
 
 
 def _resolve_user_uuid(explicit: str | None) -> str | None:
@@ -147,10 +208,14 @@ class GodarkClient:
         api_secret: Key-pair secret (use with ``api_key_id`` and ``passphrase``).
         passphrase: User-chosen API key passphrase (required with key pair; also reads
             ``GODARK_PASSPHRASE`` / ``GDX_PASSPHRASE``).
+        environment: Named deployment preset (``Environment.TESTNET`` default).
+            Supplies the default edge URL and, for Testnet/Devnet, each
+            environment's published sequencer Noise XK pin when those are not
+            set explicitly or via env.
         base_url: Edge WebSocket origin (host only, e.g.
             ``wss://api.godark-dex.com``). The client appends ``/ws/v1`` to
-            produce the final upgrade URL. Defaults to production; override
-            with arg or ``GODARK_EDGE_URL`` / ``GDX_EDGE_URL`` env vars.
+            produce the final upgrade URL. Preference: arg →
+            ``GODARK_EDGE_URL`` / ``GDX_EDGE_URL`` → ``environment`` preset.
         user_uuid: Fallback user UUID when the edge auth response omits it
             (e.g. local edge). Also reads ``GODARK_USER_UUID`` / ``GDX_USER_UUID``.
         auto_reconnect: Automatically reconnect on disconnect.
@@ -161,9 +226,10 @@ class GodarkClient:
             an OPEN/reject/fill/cancel update when ``confirmation="book"``.
             Defaults to the command timeout.
         noise_static_public_key_hex: Pinned 32-byte sequencer X25519 static key
-            in hexadecimal. Defaults to ``GDX_NOISE_STATIC_PUBLIC_KEY`` (or
-            the compatible ``GDX_NOISE_STATIC_PUBKEY`` /
-            ``GODARK_NOISE_STATIC_PUBLIC_KEY`` environment variables).
+            in hexadecimal. Preference: arg → ``GDX_NOISE_STATIC_PUBLIC_KEY``
+            (aliases ``GDX_NOISE_STATIC_PUBKEY`` /
+            ``GODARK_NOISE_STATIC_PUBLIC_KEY``) → baked-in pin from
+            ``environment`` (Testnet/Devnet only).
 
     Usage::
 
@@ -175,8 +241,9 @@ class GodarkClient:
         # Local edge (no user_uuid in auth response):
         async with GodarkClient(
             api_key="test-key-1",
-            base_url="ws://localhost:4000",
+            environment=Environment.LOCALNET,
             user_uuid="00000000-0000-4000-8000-000000000001",
+            noise_static_public_key_hex="…",  # required on localnet
         ) as client:
             ack = await client.place_order(
                 symbol="BTC-USDC-PERP", side="BUY", order_type="LIMIT",
@@ -192,6 +259,7 @@ class GodarkClient:
         api_key_id: str | None = None,
         api_secret: str | None = None,
         passphrase: str | None = None,
+        environment: Environment = Environment.TESTNET,
         base_url: str | None = None,
         user_uuid: str | None = None,
         auto_reconnect: bool = True,
@@ -217,13 +285,18 @@ class GodarkClient:
         else:
             raise ValueError("provide api_key or both api_key_id and api_secret")
 
-        self._base_url = _resolve_edge_base_url(base_url)
+        if not isinstance(environment, Environment):
+            raise TypeError("environment must be an Environment")
+
+        self._environment = environment
+        self._base_url = _resolve_edge_base_url(base_url, environment.edge_base_url)
         self._config_user_uuid = _resolve_user_uuid(user_uuid)
         self._auto_reconnect = auto_reconnect
-        self._symbol_map = dict(symbol_map) if symbol_map is not None else load_default_symbol_map()
+        self._user_symbol_map = symbol_map is not None
+        self._symbol_map = dict(symbol_map) if symbol_map is not None else load_offline_symbol_map()
         self._transport_config = transport
-        self._noise_static_public_key_hex = (
-            noise_static_public_key_hex.strip() if noise_static_public_key_hex else None
+        self._noise_static_public_key_hex = _resolve_noise_static_public_key_hex(
+            noise_static_public_key_hex, environment
         )
         self._place_order_terminal_timeout = (
             place_order_terminal_timeout
@@ -328,6 +401,13 @@ class GodarkClient:
     async def connect(self) -> None:
         """Connect, authenticate, and establish a Noise XK session."""
         self._intentional_close = False
+
+        if not self._user_symbol_map:
+            from .rest_client import _ws_origin_to_http_rest
+
+            self._symbol_map = await load_symbol_map_from_edge(
+                _ws_origin_to_http_rest(self._base_url)
+            )
 
         await self._transport.connect()
         self._transport.on_encrypted_push = self._handle_encrypted_push

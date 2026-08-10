@@ -2,7 +2,7 @@
 
 from ._proto import SequencerPush
 from ._transport import TransportConfig
-from .client import GodarkClient
+from .client import Environment, GodarkClient
 from .enums import (
     CancelReason,
     OrderStatus,
@@ -62,6 +62,7 @@ from .types import (
 )
 
 __all__ = [
+    "Environment",
     "GodarkClient",
     "GodarkRestClient",
     "MarketDataClient",
