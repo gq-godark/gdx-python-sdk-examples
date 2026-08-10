@@ -53,6 +53,8 @@ async def main() -> int:
                     time_in_force=TimeInForce.GTC,
                 )
                 print(f"Place OK — order_id={ack.order_id}")
+                # Allow the resting order to settle before cancel (avoids CANCEL_TOO_SOON).
+                await asyncio.sleep(0.5)
                 cancel_ack = await client.cancel_order(str(ack.order_id), SYMBOL)
                 print(f"Cancel OK — order_id={cancel_ack.order_id}")
             except Exception as e:
