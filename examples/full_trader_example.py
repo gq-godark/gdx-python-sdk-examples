@@ -15,6 +15,7 @@ from collections import defaultdict, deque
 from dotenv import load_dotenv, print_order_error
 from godark import (
     BalanceUpdate,
+    Environment,
     FundingRateUpdate,
     GodarkClient,
     MarginAlert,
@@ -51,11 +52,8 @@ async def main() -> int:
         )
         return 1
 
-    base_url = (
-        os.environ.get("GODARK_EDGE_URL", "").strip()
-        or "wss://api.godark-dex.com"
-    )
-    print(f"Endpoint: {base_url}")
+    edge = os.environ.get("GODARK_EDGE_URL", "").strip()
+    print(f"Endpoint: {edge or Environment.TESTNET.edge_base_url}")
 
     transport = TransportConfig(
         additional_headers={"X-Trader-Tag": "python-full-trader-demo"},
@@ -72,13 +70,17 @@ async def main() -> int:
     def bump(key: str) -> None:
         counts[key] += 1
 
-    client = GodarkClient(
-        api_key_id=api_key_id,
-        api_secret=api_secret,
-        passphrase=passphrase,
-        base_url=base_url,
-        transport=transport,
-    )
+    client_kwargs: dict = {
+        "api_key_id": api_key_id,
+        "api_secret": api_secret,
+        "passphrase": passphrase,
+        "environment": Environment.TESTNET,
+        "transport": transport,
+    }
+    if edge:
+        client_kwargs["base_url"] = edge
+
+    client = GodarkClient(**client_kwargs)
 
     def on_order(u: OrderUpdate) -> None:
         bump("order_update")
