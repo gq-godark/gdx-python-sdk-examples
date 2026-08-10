@@ -41,6 +41,9 @@ async def main() -> int:
             user = client.user_uuid or ""
             print(f"Connected as user_uuid={user}")
             try:
+                # Book confirmation waits on private order updates; subscribe first.
+                await client.subscribe(["orders"])
+                await asyncio.sleep(0.35)
                 ack = await client.place_order(
                     SYMBOL,
                     Side.SELL,
