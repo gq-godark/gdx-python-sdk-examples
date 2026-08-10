@@ -41,6 +41,9 @@ async def main() -> int:
             user = client.user_uuid or ""
             print(f"Connected as user_uuid={user}")
             try:
+                # Book confirmation waits on private order updates; subscribe first.
+                await client.subscribe(["orders"])
+                await asyncio.sleep(0.35)
                 ack = await client.place_order(
                     SYMBOL,
                     Side.SELL,
@@ -50,6 +53,8 @@ async def main() -> int:
                     time_in_force=TimeInForce.GTC,
                 )
                 print(f"Place OK — order_id={ack.order_id}")
+                # Allow the resting order to settle before cancel (avoids CANCEL_TOO_SOON).
+                await asyncio.sleep(0.5)
                 cancel_ack = await client.cancel_order(str(ack.order_id), SYMBOL)
                 print(f"Cancel OK — order_id={cancel_ack.order_id}")
             except Exception as e:
