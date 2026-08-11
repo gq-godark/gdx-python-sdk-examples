@@ -12,7 +12,7 @@ import os
 import sys
 from collections import defaultdict, deque
 
-from dotenv import load_dotenv, print_order_error
+from dotenv import get_first, load_dotenv, print_order_error
 from godark import (
     BalanceUpdate,
     Environment,
@@ -41,18 +41,18 @@ async def main() -> int:
     print(sep)
     print("Order-type support in this distribution: MARKET, LIMIT")
 
-    api_key_id = os.environ.get("GODARK_API_KEY_ID", "").strip()
-    api_secret = os.environ.get("GODARK_API_SECRET", "").strip()
-    passphrase = os.environ.get("GODARK_PASSPHRASE", "").strip()
+    api_key_id = get_first("GODARK_API_KEY_ID", "GDX_API_KEY_ID")
+    api_secret = get_first("GODARK_API_SECRET", "GDX_API_SECRET")
+    passphrase = get_first("GODARK_PASSPHRASE", "GDX_PASSPHRASE")
     if not api_key_id or not api_secret or not passphrase:
         print(
             "Missing GODARK_API_KEY_ID / GODARK_API_SECRET / GODARK_PASSPHRASE "
-            "(.env at repo root).",
+            "(legacy GDX_* aliases are accepted).",
             file=sys.stderr,
         )
         return 1
 
-    edge = os.environ.get("GODARK_EDGE_URL", "").strip()
+    edge = get_first("GODARK_EDGE_URL", "GDX_EDGE_URL")
     print(f"Endpoint: {edge or Environment.TESTNET.edge_base_url}")
 
     transport = TransportConfig(

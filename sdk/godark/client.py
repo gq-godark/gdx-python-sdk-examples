@@ -140,9 +140,9 @@ def _resolve_noise_static_public_key_hex(
     if explicit is not None and str(explicit).strip() != "":
         return str(explicit).strip()
     for key in (
+        "GODARK_NOISE_STATIC_PUBLIC_KEY",
         "GDX_NOISE_STATIC_PUBLIC_KEY",
         "GDX_NOISE_STATIC_PUBKEY",
-        "GODARK_NOISE_STATIC_PUBLIC_KEY",
     ):
         v = os.environ.get(key, "").strip()
         if v:
