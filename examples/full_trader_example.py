@@ -181,6 +181,16 @@ async def main() -> int:
     print("Subscribed to order + position updates")
     await asyncio.sleep(0.35)
 
+    # Leverage is per-symbol account state (not a place/mass_quote field).
+    print("Setting leverage to 1 via update_leverage...")
+    try:
+        lev_ack = await client.update_leverage(SYMBOL, 1)
+        print(f"update_leverage: success={lev_ack.success} order_id={lev_ack.order_id}")
+    except Exception as e:
+        print_order_error("update_leverage rejected", e)
+        await client.disconnect()
+        return 1
+
     def drain_orders(label: str) -> None:
         n = len(order_events)
         while order_events:
@@ -266,7 +276,7 @@ async def main() -> int:
     ]
     resting_ids: list[int] = []
     try:
-        mq = await client.mass_quote(SYMBOL, ladder, leverage=1)
+        mq = await client.mass_quote(SYMBOL, ladder)
         print(f"Mass quote: success={mq.success} sequence={mq.sequence} legs={len(mq.results)}")
         for r in mq.results:
             print(
@@ -306,7 +316,7 @@ async def main() -> int:
     try:
         mq = await client.mass_quote(
             SYMBOL, [{"side": Side.BUY, "price": cross_px, "quantity": 0.001}],
-            leverage=1, post_only=True,
+            post_only=True,
         )
         for r in mq.results:
             print(f"  leg {r.leg_index}: status={r.status} err={r.error_code} "
@@ -321,7 +331,7 @@ async def main() -> int:
     try:
         mq = await client.mass_quote(
             SYMBOL, [{"side": Side.BUY, "price": cross_px, "quantity": 0.003}],
-            leverage=1, post_only=False,
+            post_only=False,
         )
         for r in mq.results:
             print(f"  leg {r.leg_index}: status={r.status} new_order_id={r.new_order_id} "
