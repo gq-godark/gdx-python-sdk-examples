@@ -31,7 +31,11 @@ from .enums import (  # noqa: E402
 from .types import (  # noqa: E402
     BalanceUpdate,
     FundingRateUpdate,
+    LeverageSetting,
+    LeverageSettings,
     MarginAlert,
+    OpenOrderRow,
+    OpenOrdersSnapshot,
     OrderUpdate,
     PositionRow,
     PositionsSnapshot,
@@ -111,7 +115,11 @@ def build_place_order_proto(
     correlation_id_bytes: bytes | None = None,
     timestamp: int = 0,
 ) -> bytes:
-    """Build a PlaceOrderInput wrapped in EdgeSequencerRequest, return serialized bytes."""
+    """Build a PlaceOrderInput wrapped in EdgeSequencerRequest, return serialized bytes.
+
+    Per-symbol leverage is account state set via :func:`build_update_leverage_proto`;
+    place orders inherit the sequencer-stored setting (not a client field).
+    """
     place = sequencer_pb2.PlaceOrderInput(
         symbol_id=symbol_id,
         side=_SIDE_TO_PROTO[side if isinstance(side, str) else side.value],
@@ -205,7 +213,6 @@ def build_mass_quote_proto(
     user_uuid: bytes,
     legs: list[dict[str, Any]],
     correlation_id_bytes: bytes | None = None,
-    leverage: int = 1,
     post_only: bool | None = None,
 ) -> bytes:
     """Build a MassQuoteInput wrapped in EdgeSequencerRequest, return serialized bytes.
@@ -213,6 +220,9 @@ def build_mass_quote_proto(
     Each leg dict supports: ``side`` (str/Side), ``price`` (float), ``quantity``
     (float), ``cancel_order_id`` (int|None, 0/None = pure place), ``time_in_force``
     (str, default GTC), ``expiry_time`` (int|None), ``correlation_id`` (bytes|None).
+
+    Per-symbol leverage is account state set via :func:`build_update_leverage_proto`;
+    mass-quote legs inherit the sequencer-stored setting (not a client field).
 
     ``post_only`` is the batch-level flag: ``None`` omits it (node defaults to
     post-only); ``False`` enables the relaxed path where a crossing leg takes
@@ -228,7 +238,6 @@ def build_mass_quote_proto(
         symbol_id=symbol_id,
         user_commitment=b"",
         user_uuid=user_uuid,
-        leverage=leverage,
     )
     if correlation_id_bytes is not None:
         mq.correlation_id = correlation_id_body_bytes(correlation_id_bytes)
@@ -431,8 +440,36 @@ def parse_node_response(data: bytes) -> dict[str, Any]:
         }
     elif which == "signing":
         return {"type": "signing"}
+    elif which == "open_orders_snapshot":
+        return {"type": "open_orders_snapshot", "snapshot": resp.open_orders_snapshot}
     else:
         return {"type": "unknown"}
+
+
+def parse_open_orders_snapshot(data: bytes) -> OpenOrdersSnapshot:
+    """Decode a NodeResponse carrying OpenOrdersSnapshot."""
+    resp = sequencer_pb2.NodeResponse()
+    resp.ParseFromString(data)
+    which = resp.WhichOneof("inner")
+    if which != "open_orders_snapshot":
+        raise ValueError(f"expected NodeResponse.open_orders_snapshot, got {which}")
+    snap = resp.open_orders_snapshot
+    rows = tuple(
+        OpenOrderRow(
+            order_id=str(row.order_id),
+            symbol_id=int(row.symbol_id),
+            leverage=int(row.leverage),
+            price=str(row.price),
+            quantity=str(row.quantity),
+            remaining_qty=str(row.remaining_qty),
+        )
+        for row in snap.rows
+    )
+    return OpenOrdersSnapshot(
+        rows=rows,
+        server_timestamp=int(snap.server_timestamp),
+        correlation_id=_correlation_id_to_int(snap.correlation_id),
+    )
 
 
 _MASS_QUOTE_LEG_STATUS_FROM_PROTO: dict[int, str] = {
@@ -725,6 +762,17 @@ def parse_settlement_update_proto(msg: sequencer_pb2.SettlementUpdateMessage) ->
     )
 
 
+def parse_leverage_settings_proto(msg: sequencer_pb2.LeverageSettings) -> LeverageSettings:
+    rows = tuple(
+        LeverageSetting(symbol_id=int(r.symbol_id), leverage=int(r.leverage)) for r in msg.settings
+    )
+    return LeverageSettings(
+        settings=rows,
+        user_uuid=_uuid_bytes_to_str(msg.user_uuid),
+        server_timestamp=int(msg.server_timestamp),
+    )
+
+
 SequencerPush: TypeAlias = (
     OrderUpdate
     | PositionUpdate
@@ -734,6 +782,7 @@ SequencerPush: TypeAlias = (
     | MarginAlert
     | FundingRateUpdate
     | SettlementUpdate
+    | LeverageSettings
     | UnknownSequencerPush
 )
 
@@ -760,4 +809,6 @@ def parse_sequencer_to_edge_message(data: bytes) -> SequencerPush:
         return parse_balance_update_proto(msg.balance_update)
     if which == "margin_alert":
         return parse_margin_alert_proto(msg.margin_alert)
+    if which == "leverage_settings":
+        return parse_leverage_settings_proto(msg.leverage_settings)
     return UnknownSequencerPush(oneof_field=which)

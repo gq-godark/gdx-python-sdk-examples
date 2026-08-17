@@ -43,9 +43,11 @@ from .types import (
     BatchModifyAck,
     BatchModifyLegResult,
     FundingRateUpdate,
+    LeverageSettings,
     MarginAlert,
     MassQuoteAck,
     MassQuoteLegResult,
+    OpenOrdersSnapshot,
     OrderAck,
     OrderUpdate,
     PositionsSnapshot,
@@ -140,9 +142,9 @@ def _resolve_noise_static_public_key_hex(
     if explicit is not None and str(explicit).strip() != "":
         return str(explicit).strip()
     for key in (
+        "GODARK_NOISE_STATIC_PUBLIC_KEY",
         "GDX_NOISE_STATIC_PUBLIC_KEY",
         "GDX_NOISE_STATIC_PUBKEY",
-        "GODARK_NOISE_STATIC_PUBLIC_KEY",
     ):
         v = os.environ.get(key, "").strip()
         if v:
@@ -226,9 +228,9 @@ class GodarkClient:
             an OPEN/reject/fill/cancel update when ``confirmation="book"``.
             Defaults to the command timeout.
         noise_static_public_key_hex: Pinned 32-byte sequencer X25519 static key
-            in hexadecimal. Preference: arg → ``GDX_NOISE_STATIC_PUBLIC_KEY``
-            (aliases ``GDX_NOISE_STATIC_PUBKEY`` /
-            ``GODARK_NOISE_STATIC_PUBLIC_KEY``) → baked-in pin from
+            in hexadecimal. Preference: arg → ``GODARK_NOISE_STATIC_PUBLIC_KEY``
+            (aliases ``GDX_NOISE_STATIC_PUBLIC_KEY`` /
+            ``GDX_NOISE_STATIC_PUBKEY``) → baked-in pin from
             ``environment`` (Testnet/Devnet only).
 
     Usage::
@@ -350,6 +352,12 @@ class GodarkClient:
         self._settlement_queue: asyncio.Queue[SettlementUpdate] = asyncio.Queue(
             maxsize=stream_buffer_size
         )
+        self._open_orders_snapshot_queue: asyncio.Queue[OpenOrdersSnapshot] = asyncio.Queue(
+            maxsize=stream_buffer_size
+        )
+        self._leverage_settings_queue: asyncio.Queue[LeverageSettings] = asyncio.Queue(
+            maxsize=stream_buffer_size
+        )
         self._order_callbacks: list[Callable[[OrderUpdate], None]] = []
         self._position_callbacks: list[Callable[[PositionUpdate], None]] = []
         self._positions_snapshot_callbacks: list[Callable[[PositionsSnapshot], None]] = []
@@ -358,6 +366,8 @@ class GodarkClient:
         self._margin_alert_callbacks: list[Callable[[MarginAlert], None]] = []
         self._funding_rate_callbacks: list[Callable[[FundingRateUpdate], None]] = []
         self._settlement_callbacks: list[Callable[[SettlementUpdate], None]] = []
+        self._open_orders_snapshot_callbacks: list[Callable[[OpenOrdersSnapshot], None]] = []
+        self._leverage_settings_callbacks: list[Callable[[LeverageSettings], None]] = []
         self._reconnect_callbacks: list[Callable[[], None]] = []
         self._error_callbacks: list[Callable[[BaseException], None]] = []
         self._place_outcome_waiters: list[dict[str, Any]] = []
@@ -590,11 +600,38 @@ class GodarkClient:
 
         return await self._send_encrypted_order("modify", symbol_id, plaintext, corr_id)
 
+    async def update_leverage(self, symbol: str, leverage: int) -> OrderAck:
+        """Set per-symbol account leverage (Noise XK WebSocket).
+
+        Place / mass-quote inherit this setting server-side; clients must not
+        send leverage on those requests. Uses the legacy ``encrypted_order``
+        frame because the docs-wire op surface does not include update_leverage.
+        """
+        self._ensure_ready()
+        symbol_id = self._resolve_symbol(symbol)
+        lev = max(1, int(leverage))
+        corr_id = _new_correlation_id()
+        plaintext = _proto.build_update_leverage_proto(
+            user_uuid=self._user_uuid_bytes(),
+            symbol_id=symbol_id,
+            leverage=lev,
+            correlation_id_bytes=corr_id,
+        )
+        response = await self._send_encrypted_command(
+            "update_leverage",
+            "order.update_leverage",
+            symbol_id,
+            plaintext,
+            corr_id,
+            header_extra={"leverage": lev},
+            force_legacy_frame=True,
+        )
+        return self._parse_order_response(response)
+
     async def mass_quote(
         self,
         symbol: str,
         legs: list[dict],
-        leverage: int = 1,
         post_only: bool | None = None,
     ) -> MassQuoteAck:
         """Bulk cancel-replace (market-maker mass quote).
@@ -603,6 +640,9 @@ class GodarkClient:
         ``price`` (float), ``quantity`` (float), optional ``cancel_order_id``
         (int; omit/0 = pure place), ``time_in_force`` ("GTC"/"GTD", default GTC),
         ``expiry_time`` (ns, GTD only). Up to 20 legs per batch, single symbol.
+
+        Per-symbol leverage is account state; set it with
+        :meth:`update_leverage` before placing or mass-quoting.
 
         ``post_only`` controls the batch matching mode. Left as ``None`` (the
         default) every replacement is post-only: a leg that would cross is
@@ -623,7 +663,6 @@ class GodarkClient:
             user_uuid=self._user_uuid_bytes(),
             legs=legs,
             correlation_id_bytes=corr_id,
-            leverage=leverage,
             post_only=post_only,
         )
         response = await self._send_encrypted_command(
@@ -765,6 +804,14 @@ class GodarkClient:
         """Register for settlement-batch lifecycle updates."""
         self._settlement_callbacks.append(callback)
 
+    def on_open_orders_snapshot(self, callback: Callable[[OpenOrdersSnapshot], None]) -> None:
+        """Register for encrypted open-orders snapshots (subscribe / UpdateLeverage refresh)."""
+        self._open_orders_snapshot_callbacks.append(callback)
+
+    def on_leverage_settings(self, callback: Callable[[LeverageSettings], None]) -> None:
+        """Register for encrypted leverage-settings pushes (positions subscribe / UpdateLeverage)."""
+        self._leverage_settings_callbacks.append(callback)
+
     async def positions_snapshots(self) -> AsyncIterator[PositionsSnapshot]:
         """Iterate positions snapshot batches."""
         async for u in self._queue_iter(self._positions_snapshot_queue):
@@ -788,6 +835,11 @@ class GodarkClient:
 
     async def settlement_updates(self) -> AsyncIterator[SettlementUpdate]:
         async for u in self._queue_iter(self._settlement_queue):
+            yield u
+
+    async def leverage_settings_updates(self) -> AsyncIterator[LeverageSettings]:
+        """Iterate encrypted leverage-settings pushes."""
+        async for u in self._queue_iter(self._leverage_settings_queue):
             yield u
 
     def on_reconnect(self, callback: Callable[[], None]) -> None:
@@ -891,12 +943,17 @@ class GodarkClient:
         symbol_id: int,
         plaintext: bytes,
         correlation_id: bytes = b"",
+        *,
+        header_extra: dict[str, Any] | None = None,
+        force_legacy_frame: bool = False,
     ) -> dict:
         """Encrypt one edge command and await its raw transport response.
 
         Shared by order place/cancel/modify, mass quote and batch cancel/modify.
         ``request_type`` sets the encrypted ``OrderHeader`` request type (also used
         as AES-GCM AAD); ``docs_op`` is the WS docs op string in docs-wire mode.
+        ``force_legacy_frame`` sends ``type: encrypted_order`` even when docs wire
+        is enabled (needed for ops the docs envelope does not yet expose).
         """
         body_length = CryptoSession.body_length_for_plaintext(len(plaintext))
         corr_id_str = correlation_id.hex() if len(correlation_id) == 16 else ""
@@ -929,7 +986,9 @@ class GodarkClient:
                 "body_length": body_length,
                 "correlation_id": corr_id_str,
             }
-            if self._transport.use_docs_wire:
+            if header_extra:
+                header_obj.update(header_extra)
+            if self._transport.use_docs_wire and not force_legacy_frame:
                 return {
                     "id": str(uuid.uuid4()),
                     "op": docs_op,
@@ -1212,6 +1271,22 @@ class GodarkClient:
             self._emit_error(err)
             return
 
+        # Open-orders snapshots are NodeResponse (not SequencerToEdgeMessage).
+        if message_type == "open_orders_snapshot":
+            try:
+                snap = _proto.parse_open_orders_snapshot(plaintext)
+            except Exception as e:
+                err = GodarkError(f"Failed to parse open_orders_snapshot: {e}")
+                err.__cause__ = e
+                logger.error("Failed to parse open_orders_snapshot: %s", e)
+                self._emit_error(err)
+                return
+            self._bounded_put(self._open_orders_snapshot_queue, snap)
+            for cb in self._open_orders_snapshot_callbacks:
+                with contextlib.suppress(Exception):
+                    cb(snap)
+            return
+
         try:
             parsed = _proto.parse_sequencer_to_edge_message(plaintext)
         except Exception as e:
@@ -1278,6 +1353,13 @@ class GodarkClient:
         if isinstance(parsed, SettlementUpdate):
             self._bounded_put(self._settlement_queue, parsed)
             for cb in self._settlement_callbacks:
+                with contextlib.suppress(Exception):
+                    cb(parsed)
+            return
+
+        if isinstance(parsed, LeverageSettings):
+            self._bounded_put(self._leverage_settings_queue, parsed)
+            for cb in self._leverage_settings_callbacks:
                 with contextlib.suppress(Exception):
                     cb(parsed)
             return
