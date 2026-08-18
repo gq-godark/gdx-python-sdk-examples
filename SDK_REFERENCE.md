@@ -87,8 +87,10 @@ helper loads it from the repo root; OS environment variables win over `.env` val
 | Method | Signature | Purpose |
 |--------|-----------|---------|
 | `place_order` | `async def place_order(symbol, side, order_type, quantity, price=None, time_in_force="GTC", aon=False, min_fill_size=None, expiry_time=None) -> OrderAck` | Place encrypted order; raises `OrderError` on rejection |
+| `update_leverage` | `async def update_leverage(symbol: str, leverage: int) -> OrderAck` | Set per-symbol account leverage (place/mass_quote inherit this) |
 | `cancel_order` | `async def cancel_order(order_id: str, symbol: str = "BTC-USDC-PERP") -> OrderAck` | Cancel by numeric id (passed as string) |
 | `modify_order` | `async def modify_order(order_id: str, symbol="BTC-USDC-PERP", new_price=None, new_quantity=None) -> OrderAck` | Amend price and/or quantity of a working order |
+| `mass_quote` | `async def mass_quote(symbol, legs, post_only=None) -> MassQuoteAck` | Bulk cancel-replace ladder (up to 20 legs) |
 
 `side`, `order_type`, and `time_in_force` accept either the typed enum
 (`Side.SELL`) or its string name (`"SELL"`). `order_id` is a string but parses
