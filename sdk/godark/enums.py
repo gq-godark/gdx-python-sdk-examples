@@ -169,6 +169,8 @@ _RESPONSE_MESSAGE_TYPE_TO_PROTO: dict[str, int] = {
     "mass_quote_ack": 10,
     "batch_cancel_ack": 11,
     "batch_modify_ack": 12,
+    "tpsl_update": 13,
+    "leverage_settings": 14,
 }
 
 

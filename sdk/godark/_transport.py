@@ -192,7 +192,9 @@ class TransportConfig:
     additional_headers: Mapping[str, str] | None = None
     proxy: str | bool | None = True
     open_timeout: float | None = None
-    max_size: int | None = 65536
+    # Match Java/Go trading default: open_orders_snapshot frames grow with resting
+    # order count and routinely exceed the historical websockets 64 KiB default.
+    max_size: int | None = 8 * 1024 * 1024
     heartbeat_interval: float | None = None
     stale_timeout: float | None = None
     command_timeout: float | None = None
@@ -293,7 +295,9 @@ class EdgeTransport:
 
     def _connect_kwargs(self) -> dict[str, Any]:
         kw: dict[str, Any] = {
-            "max_size": self._config.max_size if self._config.max_size is not None else 65536,
+            "max_size": self._config.max_size
+            if self._config.max_size is not None
+            else 8 * 1024 * 1024,
         }
         if self._config.ssl is not None:
             kw["ssl"] = self._config.ssl
@@ -504,7 +508,29 @@ class EdgeTransport:
 
     @staticmethod
     def _normalize_correlation_key(corr: Any) -> str:
-        return corr.lower() if isinstance(corr, str) and corr else ""
+        """Canonical hex key for correlation waiters.
+
+        Outbound headers stamp 32-char hex; encrypted ack pushes often echo the
+        same u128 as a decimal string. Normalize both to lowercase hex so
+        ``resolve_command`` can match concurrent waiters.
+        """
+        if isinstance(corr, int):
+            if corr < 0:
+                return ""
+            return corr.to_bytes(16, "big").hex()
+        if not isinstance(corr, str) or not corr:
+            return ""
+        s = corr.strip().lower()
+        if not s:
+            return ""
+        if s.isdigit():
+            try:
+                return int(s).to_bytes(16, "big").hex()
+            except (OverflowError, ValueError):
+                return s
+        if len(s) == 32 and all(c in "0123456789abcdef" for c in s):
+            return s
+        return s
 
     def resolve_command(self, result: dict) -> bool:
         """Resolve the pending command future with the given result.
