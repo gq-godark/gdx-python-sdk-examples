@@ -67,6 +67,7 @@ bash scripts/setup_venv.sh
 source .venv/bin/activate
 cd examples && python quickstart.py
 python full_trader_example.py
+python rest_client_example.py
 ```
 
 `setup_venv.sh` **prefers installing the packaged wheel** under `wheels/` (immutable SDK snapshot). Dependencies such as `cryptography` are pulled from PyPI using the wheel’s metadata.
@@ -100,6 +101,7 @@ bash scripts/package.sh
 |--------|---------|
 | `examples/quickstart.py` | Minimal connect → `subscribe(["orders"])` → LIMIT sell far from touch → cancel (book confirmation needs the private orders channel) |
 | `examples/full_trader_example.py` | Callbacks for pushes, place / modify / cancel, mass-quote / batch-cancel, session summary |
+| `examples/rest_client_example.py` | REST auth + `/auth/me` + leverage read + public funding/OI/volume (no encrypted trading) |
 
 Order-type support in this MM distribution is limited to **`MARKET`** and **`LIMIT`**.
 

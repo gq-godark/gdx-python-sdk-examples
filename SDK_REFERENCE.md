@@ -358,3 +358,7 @@ Maintainers refresh `sdk/` from a sibling upstream checkout:
 ```bash
 ./scripts/refresh_sdk.sh /path/to/gdx-python-sdk
 ```
+
+## RestClient example
+
+`GodarkRestClient` is exercised by `rest_client_example` / `rest-client-example`: REST auth, `/auth/me`, leverage read, and public funding/OI/volume GETs. Encrypted place/cancel/modify/update-leverage remain WebSocket-only via `GodarkClient`.

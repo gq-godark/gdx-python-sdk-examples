@@ -34,7 +34,7 @@ if [[ ! -f "${REPO_ROOT}/sdk/pyproject.toml" ]]; then
   echo "error: sdk/pyproject.toml missing — cannot build wheel" >&2
   exit 1
 fi
-for required in bundle/README.md bundle/SDK_REFERENCE.md .env.example examples/quickstart.py examples/full_trader_example.py examples/dotenv.py; do
+for required in bundle/README.md bundle/SDK_REFERENCE.md .env.example examples/quickstart.py examples/full_trader_example.py examples/rest_client_example.py examples/dotenv.py; do
   if [[ ! -f "${REPO_ROOT}/${required}" ]]; then
     echo "error: required source file missing: ${required}" >&2
     exit 1
@@ -63,6 +63,7 @@ echo "Staging wheels-only distribution at $DEST ..."
 cp "${REPO_ROOT}/sdk/dist-wheels"/godark-*.whl "$DEST/wheels/"
 cp "${REPO_ROOT}/examples/quickstart.py" \
    "${REPO_ROOT}/examples/full_trader_example.py" \
+   "${REPO_ROOT}/examples/rest_client_example.py" \
    "${REPO_ROOT}/examples/dotenv.py" \
    "$DEST/examples/"
 cp "${REPO_ROOT}/.env.example" "$DEST/"
