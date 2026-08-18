@@ -174,14 +174,23 @@ def _resolve_passphrase(explicit: str | None) -> str | None:
     return None
 
 
+def _rewrite_http_to_ws(url: str) -> str:
+    if url.startswith("http://"):
+        return "ws://" + url[len("http://") :]
+    if url.startswith("https://"):
+        return "wss://" + url[len("https://") :]
+    return url
+
+
 def _ws_url(base_url: str) -> str:
     """Return the canonical WebSocket URL ending in ``/ws/v1``.
 
+    - Rewrites ``http(s)://`` to ``ws(s)://``.
     - If ``base_url`` already ends with ``/ws/v1``, returns it unchanged.
     - If it ends with the legacy ``/ws`` suffix, upgrades it to ``/ws/v1``.
     - Otherwise, appends ``/ws/v1`` to the (slash-stripped) base.
     """
-    url = base_url.rstrip("/")
+    url = _rewrite_http_to_ws(base_url.rstrip("/"))
     if url.endswith("/ws/v1"):
         return url
     if url.endswith("/ws"):

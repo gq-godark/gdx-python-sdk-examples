@@ -21,10 +21,15 @@ from .errors import GodarkError
 logger = logging.getLogger("godark.market_data")
 
 _ORDERBOOK_DOCS_WIRE_MSG = (
-    "L2 orderbook is not available on /ws/v1; set GODARK_ORDERBOOK_WS_URL to a direct L2 "
+    "L2 orderbook is not available on /ws/v1; set GODARK_MARKET_DATA_WS_URL to a direct L2 "
     "stream URL, use subscribe_public_channel for public edge feeds, or "
     "GODARK_MARKET_DATA_USE_GOMARKET=1 for local /ws/gomarket"
 )
+
+
+def _is_docs_wire_url(url: str) -> bool:
+    path = url.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    return path.endswith("/ws/v1")
 
 
 def _env_first(*keys: str) -> str | None:
@@ -130,7 +135,7 @@ class MarketDataClient:
 
     def __init__(self, base_url: str, transport: TransportConfig | None = None):
         self._url = resolve_market_data_ws_url(base_url.strip())
-        self._docs_wire = self._url.endswith("/ws/v1")
+        self._docs_wire = _is_docs_wire_url(self._url)
         self._transport_config = transport or TransportConfig()
         self._ws: ClientConnection | None = None
         self._connected = False
@@ -214,17 +219,11 @@ class MarketDataClient:
     async def unsubscribe(self, channel: str, symbol: str) -> None:
         key = f"{channel}:{symbol}"
         self._callbacks.pop(key, None)
+        self._callbacks.pop(f"{channel}:", None)
         self._desired_subs.discard((channel, symbol))
+        self._desired_subs.discard(("__public__", channel))
         if self._ws:
-            await self._ws.send(
-                json.dumps(
-                    {
-                        "action": "unsubscribe",
-                        "channel": channel,
-                        "symbol": symbol,
-                    }
-                )
-            )
+            await self._send_unsubscribe(channel, symbol)
 
     async def _subscribe(self, channel: str, symbol: str, callback: Callable) -> None:
         key = f"{channel}:{symbol}"
@@ -256,6 +255,25 @@ class MarketDataClient:
         else:
             payload = {
                 "action": "subscribe",
+                "channel": channel,
+                "symbol": symbol,
+            }
+        await self._ws.send(json.dumps(payload))
+
+    async def _send_unsubscribe(self, channel: str, symbol: str) -> None:
+        assert self._ws is not None
+        if self._docs_wire:
+            arg: dict[str, Any] = {"channel": channel}
+            if symbol:
+                arg["symbol"] = symbol
+            payload: dict[str, Any] = {
+                "id": str(uuid.uuid4()),
+                "op": "unsubscribe",
+                "args": [arg],
+            }
+        else:
+            payload = {
+                "action": "unsubscribe",
                 "channel": channel,
                 "symbol": symbol,
             }
