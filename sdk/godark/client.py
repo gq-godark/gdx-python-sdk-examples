@@ -142,9 +142,9 @@ def _resolve_noise_static_public_key_hex(
     if explicit is not None and str(explicit).strip() != "":
         return str(explicit).strip()
     for key in (
+        "GODARK_NOISE_STATIC_PUBLIC_KEY",
         "GDX_NOISE_STATIC_PUBLIC_KEY",
         "GDX_NOISE_STATIC_PUBKEY",
-        "GODARK_NOISE_STATIC_PUBLIC_KEY",
     ):
         v = os.environ.get(key, "").strip()
         if v:
@@ -228,9 +228,9 @@ class GodarkClient:
             an OPEN/reject/fill/cancel update when ``confirmation="book"``.
             Defaults to the command timeout.
         noise_static_public_key_hex: Pinned 32-byte sequencer X25519 static key
-            in hexadecimal. Preference: arg → ``GDX_NOISE_STATIC_PUBLIC_KEY``
-            (aliases ``GDX_NOISE_STATIC_PUBKEY`` /
-            ``GODARK_NOISE_STATIC_PUBLIC_KEY``) → baked-in pin from
+            in hexadecimal. Preference: arg → ``GODARK_NOISE_STATIC_PUBLIC_KEY``
+            (aliases ``GDX_NOISE_STATIC_PUBLIC_KEY`` /
+            ``GDX_NOISE_STATIC_PUBKEY``) → baked-in pin from
             ``environment`` (Testnet/Devnet only).
 
     Usage::
