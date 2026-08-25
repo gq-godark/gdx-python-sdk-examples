@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "godark"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python SDK for the GoDark DEX — encrypted trading over WebSocket"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,6 +14,7 @@ dependencies = [
     "cryptography>=42.0",
     "protobuf>=5.0",
     "httpx>=0.27",
+    "pyhpke>=0.6.5",
 ]
 
 [project.urls]

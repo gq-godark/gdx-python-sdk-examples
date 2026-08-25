@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal GodarkRestClient demo — auth + account reads + public market data.
+"""Minimal GodarkRestClient demo — auth + account reads.
 
 Encrypted place/cancel/modify/update_leverage require GodarkClient (WebSocket /
 HPKE); see quickstart.py / full_trader_example.py.
@@ -45,27 +45,22 @@ async def main() -> int:
 
     client = GodarkRestClient(**rest_kwargs)
     try:
-        # Public market-data GETs — no connect() / bearer required.
-        rates = await client.get_funding_rates()
-        oi = await client.get_open_interest()
-        vol = await client.get_volume()
-        print(f"funding_rates: {len(rates)} symbols (first={rates[0] if rates else None})")
-        print(f"open_interest: {len(oi)} symbols (first={oi[0] if oi else None})")
-        print(
-            f"volume: total_24h={vol.get('total_volume_24h')} "
-            f"symbols={len(vol.get('symbols') or [])}"
-        )
-
         print("connecting (REST auth/token)...")
         await client.connect()
 
-        me = await client.get_me()
-        print(f"me: id={me.id} wallet={me.wallet_address} tier={me.tier}")
+        try:
+            me = await client.get_me()
+            print(f"me: id={me.id} wallet={me.wallet_address} tier={me.tier}")
+        except Exception as exc:
+            print(f"get_me skipped: {exc}")
 
-        lev = await client.get_leverage()
-        print(f"leverage settings: {len(lev.settings)} entries")
-        for row in lev.settings[:5]:
-            print(f"  symbol_id={row.symbol_id} leverage={row.leverage}")
+        try:
+            lev = await client.get_leverage()
+            print(f"leverage settings: {len(lev.settings)} entries")
+            for row in lev.settings[:5]:
+                print(f"  symbol_id={row.symbol_id} leverage={row.leverage}")
+        except Exception as exc:
+            print(f"get_leverage skipped: {exc}")
 
         try:
             bal = await client.get_my_balance()
