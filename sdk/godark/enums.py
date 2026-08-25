@@ -159,18 +159,20 @@ _REQUEST_TYPE_TO_PROTO: dict[str, int] = {
 
 _RESPONSE_MESSAGE_TYPE_TO_PROTO: dict[str, int] = {
     "order_update": 1,
-    "system_health": 3,
-    "ack": 4,
-    "open_orders_snapshot": 5,
-    "order_history_snapshot": 6,
-    "positions_snapshot": 7,
-    "balance_and_position": 8,
-    "account_margin_update": 9,
-    "mass_quote_ack": 10,
-    "batch_cancel_ack": 11,
-    "batch_modify_ack": 12,
-    "tpsl_update": 13,
-    "leverage_settings": 14,
+    "system_health": 2,
+    "ack": 3,
+    "open_orders_snapshot": 4,
+    "positions_snapshot": 5,
+    "balance_and_position": 6,
+    "account_margin_update": 7,
+    "mass_quote_ack": 8,
+    "batch_cancel_ack": 9,
+    "batch_modify_ack": 10,
+    "tpsl_update": 11,
+    "leverage_settings": 12,
+    "cancel_all_ack": 13,
+    "close_all_ack": 14,
+    "reverse_ack": 15,
 }
 
 

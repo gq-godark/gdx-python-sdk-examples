@@ -14,10 +14,11 @@ from enum import Enum
 from typing import Any, Literal, TypeVar
 
 from . import _identity, _proto
-from ._noise import HandshakeInitiator, pinned_sequencer_static_pub, prologue_for_user
-from ._session import STAMPED_NONCE_PUSH, CryptoSession
+from ._hpke import pinned_sequencer_static_pub
+from ._session import CryptoSession
 from ._symbols import load_offline_symbol_map, load_symbol_map_from_edge
 from ._transport import EdgeTransport, TransportConfig
+from ._wire import build_order_header_proto, encode_encrypted_order, encrypted_order_request
 from .enums import (
     _RESPONSE_MESSAGE_TYPE_TO_PROTO,
     OrderStatus,
@@ -43,11 +44,9 @@ from .types import (
     BatchModifyAck,
     BatchModifyLegResult,
     FundingRateUpdate,
-    LeverageSettings,
     MarginAlert,
     MassQuoteAck,
     MassQuoteLegResult,
-    OpenOrdersSnapshot,
     OrderAck,
     OrderUpdate,
     PositionsSnapshot,
@@ -138,13 +137,17 @@ def _resolve_edge_base_url(explicit: str | None, default: str = _DEFAULT_EDGE_BA
 def _resolve_noise_static_public_key_hex(
     explicit: str | None, environment: Environment
 ) -> str | None:
-    """Resolve Noise pin: explicit arg → env vars → environment preset."""
+    """Resolve HPKE/Noise pin: explicit arg → env vars → environment preset."""
     if explicit is not None and str(explicit).strip() != "":
         return str(explicit).strip()
     for key in (
-        "GODARK_NOISE_STATIC_PUBLIC_KEY",
+        "GDX_HPKE_STATIC_PUBLIC_KEY",
+        "GDX_HPKE_STATIC_PUBKEY",
+        "GODARK_HPKE_STATIC_PUBLIC_KEY",
+        "VITE_GDX_HPKE_STATIC_PUBKEY",
         "GDX_NOISE_STATIC_PUBLIC_KEY",
         "GDX_NOISE_STATIC_PUBKEY",
+        "GODARK_NOISE_STATIC_PUBLIC_KEY",
     ):
         v = os.environ.get(key, "").strip()
         if v:
@@ -174,23 +177,14 @@ def _resolve_passphrase(explicit: str | None) -> str | None:
     return None
 
 
-def _rewrite_http_to_ws(url: str) -> str:
-    if url.startswith("http://"):
-        return "ws://" + url[len("http://") :]
-    if url.startswith("https://"):
-        return "wss://" + url[len("https://") :]
-    return url
-
-
 def _ws_url(base_url: str) -> str:
     """Return the canonical WebSocket URL ending in ``/ws/v1``.
 
-    - Rewrites ``http(s)://`` to ``ws(s)://``.
     - If ``base_url`` already ends with ``/ws/v1``, returns it unchanged.
     - If it ends with the legacy ``/ws`` suffix, upgrades it to ``/ws/v1``.
     - Otherwise, appends ``/ws/v1`` to the (slash-stripped) base.
     """
-    url = _rewrite_http_to_ws(base_url.rstrip("/"))
+    url = base_url.rstrip("/")
     if url.endswith("/ws/v1"):
         return url
     if url.endswith("/ws"):
@@ -237,9 +231,9 @@ class GodarkClient:
             an OPEN/reject/fill/cancel update when ``confirmation="book"``.
             Defaults to the command timeout.
         noise_static_public_key_hex: Pinned 32-byte sequencer X25519 static key
-            in hexadecimal. Preference: arg → ``GODARK_NOISE_STATIC_PUBLIC_KEY``
-            (aliases ``GDX_NOISE_STATIC_PUBLIC_KEY`` /
-            ``GDX_NOISE_STATIC_PUBKEY``) → baked-in pin from
+            in hexadecimal. Preference: arg → ``GDX_NOISE_STATIC_PUBLIC_KEY``
+            (aliases ``GDX_NOISE_STATIC_PUBKEY`` /
+            ``GODARK_NOISE_STATIC_PUBLIC_KEY``) → baked-in pin from
             ``environment`` (Testnet/Devnet only).
 
     Usage::
@@ -361,12 +355,6 @@ class GodarkClient:
         self._settlement_queue: asyncio.Queue[SettlementUpdate] = asyncio.Queue(
             maxsize=stream_buffer_size
         )
-        self._open_orders_snapshot_queue: asyncio.Queue[OpenOrdersSnapshot] = asyncio.Queue(
-            maxsize=stream_buffer_size
-        )
-        self._leverage_settings_queue: asyncio.Queue[LeverageSettings] = asyncio.Queue(
-            maxsize=stream_buffer_size
-        )
         self._order_callbacks: list[Callable[[OrderUpdate], None]] = []
         self._position_callbacks: list[Callable[[PositionUpdate], None]] = []
         self._positions_snapshot_callbacks: list[Callable[[PositionsSnapshot], None]] = []
@@ -375,8 +363,6 @@ class GodarkClient:
         self._margin_alert_callbacks: list[Callable[[MarginAlert], None]] = []
         self._funding_rate_callbacks: list[Callable[[FundingRateUpdate], None]] = []
         self._settlement_callbacks: list[Callable[[SettlementUpdate], None]] = []
-        self._open_orders_snapshot_callbacks: list[Callable[[OpenOrdersSnapshot], None]] = []
-        self._leverage_settings_callbacks: list[Callable[[LeverageSettings], None]] = []
         self._reconnect_callbacks: list[Callable[[], None]] = []
         self._error_callbacks: list[Callable[[BaseException], None]] = []
         self._place_outcome_waiters: list[dict[str, Any]] = []
@@ -418,7 +404,7 @@ class GodarkClient:
     # ------------------------------------------------------------------
 
     async def connect(self) -> None:
-        """Connect, authenticate, and establish a Noise XK session."""
+        """Connect, authenticate, and establish an HPKE session."""
         self._intentional_close = False
 
         if not self._user_symbol_map:
@@ -467,15 +453,13 @@ class GodarkClient:
         except (KeyError, TypeError, ValueError) as exc:
             await self._transport.disconnect()
             raise AuthenticationError(
-                "auth response missing non-zero conn_id (required for Noise XK)"
+                "auth response missing non-zero conn_id (required for HPKE)"
             ) from exc
         if self._conn_id == 0:
             await self._transport.disconnect()
-            raise AuthenticationError(
-                "auth response missing non-zero conn_id (required for Noise XK)"
-            )
+            raise AuthenticationError("auth response missing non-zero conn_id (required for HPKE)")
 
-        await self._setup_noise_session()
+        await self._setup_hpke_session()
         self._connected = True
         self._reconnect_attempts = 0
         logger.info("GodarkClient connected and authenticated")
@@ -609,38 +593,11 @@ class GodarkClient:
 
         return await self._send_encrypted_order("modify", symbol_id, plaintext, corr_id)
 
-    async def update_leverage(self, symbol: str, leverage: int) -> OrderAck:
-        """Set per-symbol account leverage (Noise XK WebSocket).
-
-        Place / mass-quote inherit this setting server-side; clients must not
-        send leverage on those requests. Uses the legacy ``encrypted_order``
-        frame because the docs-wire op surface does not include update_leverage.
-        """
-        self._ensure_ready()
-        symbol_id = self._resolve_symbol(symbol)
-        lev = max(1, int(leverage))
-        corr_id = _new_correlation_id()
-        plaintext = _proto.build_update_leverage_proto(
-            user_uuid=self._user_uuid_bytes(),
-            symbol_id=symbol_id,
-            leverage=lev,
-            correlation_id_bytes=corr_id,
-        )
-        response = await self._send_encrypted_command(
-            "update_leverage",
-            "order.update_leverage",
-            symbol_id,
-            plaintext,
-            corr_id,
-            header_extra={"leverage": lev},
-            force_legacy_frame=True,
-        )
-        return self._parse_order_response(response)
-
     async def mass_quote(
         self,
         symbol: str,
         legs: list[dict],
+        leverage: int = 1,
         post_only: bool | None = None,
     ) -> MassQuoteAck:
         """Bulk cancel-replace (market-maker mass quote).
@@ -649,9 +606,6 @@ class GodarkClient:
         ``price`` (float), ``quantity`` (float), optional ``cancel_order_id``
         (int; omit/0 = pure place), ``time_in_force`` ("GTC"/"GTD", default GTC),
         ``expiry_time`` (ns, GTD only). Up to 20 legs per batch, single symbol.
-
-        Per-symbol leverage is account state; set it with
-        :meth:`update_leverage` before placing or mass-quoting.
 
         ``post_only`` controls the batch matching mode. Left as ``None`` (the
         default) every replacement is post-only: a leg that would cross is
@@ -672,6 +626,7 @@ class GodarkClient:
             user_uuid=self._user_uuid_bytes(),
             legs=legs,
             correlation_id_bytes=corr_id,
+            leverage=leverage,
             post_only=post_only,
         )
         response = await self._send_encrypted_command(
@@ -813,14 +768,6 @@ class GodarkClient:
         """Register for settlement-batch lifecycle updates."""
         self._settlement_callbacks.append(callback)
 
-    def on_open_orders_snapshot(self, callback: Callable[[OpenOrdersSnapshot], None]) -> None:
-        """Register for encrypted open-orders snapshots (subscribe / UpdateLeverage refresh)."""
-        self._open_orders_snapshot_callbacks.append(callback)
-
-    def on_leverage_settings(self, callback: Callable[[LeverageSettings], None]) -> None:
-        """Register for encrypted leverage-settings pushes (positions subscribe / UpdateLeverage)."""
-        self._leverage_settings_callbacks.append(callback)
-
     async def positions_snapshots(self) -> AsyncIterator[PositionsSnapshot]:
         """Iterate positions snapshot batches."""
         async for u in self._queue_iter(self._positions_snapshot_queue):
@@ -844,11 +791,6 @@ class GodarkClient:
 
     async def settlement_updates(self) -> AsyncIterator[SettlementUpdate]:
         async for u in self._queue_iter(self._settlement_queue):
-            yield u
-
-    async def leverage_settings_updates(self) -> AsyncIterator[LeverageSettings]:
-        """Iterate encrypted leverage-settings pushes."""
-        async for u in self._queue_iter(self._leverage_settings_queue):
             yield u
 
     def on_reconnect(self, callback: Callable[[], None]) -> None:
@@ -878,47 +820,26 @@ class GodarkClient:
     # Internals: Noise XK session
     # ------------------------------------------------------------------
 
-    async def _setup_noise_session(self) -> None:
-        """Complete the three-message Noise XK handshake over the active WebSocket."""
+    async def _setup_hpke_session(self) -> None:
+        """Complete HPKE Base setup over the active WebSocket."""
         if self._user_uuid is None or self._conn_id == 0:
-            raise SessionError("user_uuid and conn_id required before Noise XK handshake")
+            raise SessionError("user_uuid and conn_id required before HPKE setup")
         try:
             remote_static = pinned_sequencer_static_pub(self._noise_static_public_key_hex)
         except ValueError as exc:
             raise SessionError(str(exc)) from exc
-        initiator = HandshakeInitiator(remote_static, prologue_for_user(self._user_uuid_bytes()))
-
-        async def send(message: bytes) -> dict:
-            payload = (
-                {
-                    "id": str(uuid.uuid4()),
-                    "op": "noise.handshake",
-                    "args": {"message": base64.b64encode(message).decode("ascii")},
-                }
-                if self._transport.use_docs_wire
-                else {
-                    "type": "noise_handshake",
-                    "data": {"message": base64.b64encode(message).decode("ascii")},
-                }
-            )
-            response = await self._transport.send_command(payload)
-            if response.get("type") == "error":
-                raise SessionError(response.get("message", "Noise handshake failed"))
-            return response
-
-        reply = await send(initiator.write_message())
-        if int(reply.get("conn_id", 0)) != self._conn_id or bool(reply.get("established")):
-            raise SessionError("invalid Noise handshake message-2 reply")
         try:
-            initiator.read_message(base64.b64decode(reply.get("message", ""), validate=True))
+            user = uuid.UUID(self._user_uuid)
+            encapped = self._session.setup(remote_static, user, self._conn_id)
         except Exception as exc:
-            raise SessionError(f"invalid Noise handshake message-2: {exc}") from exc
+            raise SessionError(f"HPKE setup failed: {exc}") from exc
+        from ._wire import encode_hpke_setup
 
-        reply = await send(initiator.write_message())
-        if int(reply.get("conn_id", 0)) != self._conn_id or not bool(reply.get("established")):
-            raise SessionError("invalid Noise handshake completion reply")
-        self._session.establish(initiator.into_transport(), self._conn_id)
-        logger.info("Noise XK session established (conn_id=%s)", self._conn_id)
+        frame = encode_hpke_setup(user.bytes, self._conn_id, encapped)
+        reply = await self._transport.send_hpke_setup(frame)
+        if reply.get("established") is not True:
+            raise SessionError("HPKE setup not established")
+        logger.info("HPKE session established (conn_id=%s)", self._conn_id)
 
     # ------------------------------------------------------------------
     # Internals: encrypted order pipeline
@@ -952,17 +873,12 @@ class GodarkClient:
         symbol_id: int,
         plaintext: bytes,
         correlation_id: bytes = b"",
-        *,
-        header_extra: dict[str, Any] | None = None,
-        force_legacy_frame: bool = False,
     ) -> dict:
         """Encrypt one edge command and await its raw transport response.
 
         Shared by order place/cancel/modify, mass quote and batch cancel/modify.
         ``request_type`` sets the encrypted ``OrderHeader`` request type (also used
         as AES-GCM AAD); ``docs_op`` is the WS docs op string in docs-wire mode.
-        ``force_legacy_frame`` sends ``type: encrypted_order`` even when docs wire
-        is enabled (needed for ops the docs envelope does not yet expose).
         """
         body_length = CryptoSession.body_length_for_plaintext(len(plaintext))
         corr_id_str = correlation_id.hex() if len(correlation_id) == 16 else ""
@@ -971,7 +887,7 @@ class GodarkClient:
         # Encryption assigns and advances the session send-nonce, so it must be
         # atomic with the actual send to keep concurrent commands in nonce
         # order on the wire. ``prepare`` runs under the transport send lock.
-        def _prepare() -> dict:
+        def _prepare() -> bytes:
             nonce_counter = self._session.next_nonce
             aad = _proto.build_order_header_aad(
                 user_uuid=self._user_uuid_bytes(),
@@ -987,26 +903,16 @@ class GodarkClient:
             except Exception as e:
                 raise EncryptionError(f"Failed to encrypt order: {e}") from e
 
-            body_b64 = base64.b64encode(ciphertext).decode("ascii")
-            header_obj = {
-                "symbol_id": symbol_id,
-                "request_type": request_type,
-                "nonce": actual_nonce,
-                "body_length": body_length,
-                "correlation_id": corr_id_str,
-            }
-            if header_extra:
-                header_obj.update(header_extra)
-            if self._transport.use_docs_wire and not force_legacy_frame:
-                return {
-                    "id": str(uuid.uuid4()),
-                    "op": docs_op,
-                    "args": {"header": header_obj, "ciphertext": body_b64},
-                }
-            return {
-                "type": "encrypted_order",
-                "data": {"header": header_obj, "encrypted_body": body_b64},
-            }
+            header = build_order_header_proto(
+                user_uuid=self._user_uuid_bytes(),
+                symbol_id=symbol_id,
+                request_type_str=request_type,
+                nonce=actual_nonce,
+                body_length=body_length,
+                correlation_id=correlation_id,
+                conn_id=self._conn_id,
+            )
+            return encode_encrypted_order(encrypted_order_request(header, ciphertext))
 
         # Record the ack type this command expects, keyed by correlation id so
         # concurrent commands don't clobber one another. Falls back to the
@@ -1016,31 +922,15 @@ class GodarkClient:
         else:
             self._inflight_response_type = expected_ack
         try:
-            response = await self._transport.send_command(prepare=_prepare)
-            if (
-                not STAMPED_NONCE_PUSH
-                and response.get("type") == "encrypted_push"
-                and response.get("nonce") is not None
-            ):
-                await self._wait_for_prior_noise_messages(int(response["nonce"]))
-            return response
+            return await self._transport.send_binary_command(
+                prepare=_prepare,
+                correlation_id=corr_id_str,
+            )
         finally:
             if corr_id_str:
                 self._expected_ack_by_correlation.pop(corr_id_str.lower(), None)
             else:
                 self._inflight_response_type = None
-
-    async def _wait_for_prior_noise_messages(self, command_ack_nonce: int) -> None:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._transport.command_timeout
-        while self._session.recv_nonce < command_ack_nonce:
-            if loop.time() >= deadline:
-                raise TimeoutError(
-                    f"waiting for encrypted push nonce {self._session.recv_nonce} "
-                    f"before command ack nonce {command_ack_nonce}"
-                )
-            self._flush_pending_encrypted_pushes()
-            await asyncio.sleep(0.001)
 
     def _parse_order_response(self, msg: dict) -> OrderAck:
         msg_type = msg.get("type")
@@ -1208,34 +1098,8 @@ class GodarkClient:
     # ------------------------------------------------------------------
 
     def _handle_encrypted_push(self, msg: dict) -> None:
-        """Order encrypted frames by the Noise receive counter before decrypting."""
-        try:
-            nonce = int(msg.get("nonce", 0))
-        except (TypeError, ValueError):
-            logger.warning("Dropping encrypted push with invalid nonce=%r", msg.get("nonce"))
-            return
-        if not STAMPED_NONCE_PUSH:
-            # Legacy path: pushes are keyed by the sequential Noise receive counter, so deliver
-            # strictly in nonce order and buffer any that arrive early.
-            expected = self._session.recv_nonce
-            if nonce > expected:
-                self._pending_encrypted_by_nonce[nonce] = msg
-                return
-            if nonce < expected:
-                logger.warning(
-                    "Dropping stale encrypted push nonce=%d expected=%d", nonce, expected
-                )
-                return
-        # Stamped-nonce mode: decrypt each frame in arrival order at its own stamped nonce; skips
-        # are tolerated, so no reorder buffer is needed.
+        """Decrypt and dispatch an encrypted push frame."""
         self._dispatch_encrypted_push_in_order(msg)
-        self._flush_pending_encrypted_pushes()
-
-    def _flush_pending_encrypted_pushes(self) -> None:
-        while (
-            msg := self._pending_encrypted_by_nonce.pop(self._session.recv_nonce, None)
-        ) is not None:
-            self._dispatch_encrypted_push_in_order(msg)
 
     def _dispatch_encrypted_push_in_order(self, msg: dict) -> None:
         message_type = msg.get("message_type", "")
@@ -1278,22 +1142,6 @@ class GodarkClient:
             err.__cause__ = e
             logger.error("Failed to decrypt push: %s", e)
             self._emit_error(err)
-            return
-
-        # Open-orders snapshots are NodeResponse (not SequencerToEdgeMessage).
-        if message_type == "open_orders_snapshot":
-            try:
-                snap = _proto.parse_open_orders_snapshot(plaintext)
-            except Exception as e:
-                err = GodarkError(f"Failed to parse open_orders_snapshot: {e}")
-                err.__cause__ = e
-                logger.error("Failed to parse open_orders_snapshot: %s", e)
-                self._emit_error(err)
-                return
-            self._bounded_put(self._open_orders_snapshot_queue, snap)
-            for cb in self._open_orders_snapshot_callbacks:
-                with contextlib.suppress(Exception):
-                    cb(snap)
             return
 
         try:
@@ -1362,13 +1210,6 @@ class GodarkClient:
         if isinstance(parsed, SettlementUpdate):
             self._bounded_put(self._settlement_queue, parsed)
             for cb in self._settlement_callbacks:
-                with contextlib.suppress(Exception):
-                    cb(parsed)
-            return
-
-        if isinstance(parsed, LeverageSettings):
-            self._bounded_put(self._leverage_settings_queue, parsed)
-            for cb in self._leverage_settings_callbacks:
                 with contextlib.suppress(Exception):
                     cb(parsed)
             return
@@ -1461,11 +1302,11 @@ class GodarkClient:
     # ------------------------------------------------------------------
 
     async def _handle_rekey(self, msg: dict) -> None:
-        logger.info("Rekey required, re-negotiating Noise XK session")
+        logger.info("Rekey required, re-negotiating HPKE session")
         try:
             self._session.reset()
             self._pending_encrypted_by_nonce.clear()
-            await self._setup_noise_session()
+            await self._setup_hpke_session()
         except Exception as e:
             if isinstance(e, SessionError):
                 err: SessionError = e
@@ -1517,7 +1358,7 @@ class GodarkClient:
         if self._user_uuid is None:
             raise ConnectionError("Not authenticated")
         if not self._session.is_established:
-            raise SessionError("Noise XK session not established")
+            raise SessionError("HPKE session not established")
 
     @staticmethod
     def _parse_user_uuid_bytes(msg: dict) -> bytes:

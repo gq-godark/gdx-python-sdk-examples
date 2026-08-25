@@ -158,8 +158,11 @@ class SystemHealthUpdate:
 @dataclass(frozen=True)
 class BalanceUpdate:
     user_uuid: str
-    shielded_balance_raw: int
+    balance_raw: int
     timestamp: int
+    balance: str = ""
+    signed_balance_8dp: int = 0
+    free_collateral_8dp: int = 0
 
 
 @dataclass(frozen=True)
@@ -230,36 +233,7 @@ class LeverageSetting:
 
 @dataclass(frozen=True)
 class LeverageSettings:
-    """Per-user leverage prefs from REST ``GET /leverage`` or encrypted WS push.
-
-    WS pushes (positions subscribe / after ``update_leverage``) also carry
-    ``user_uuid`` and ``server_timestamp``; REST snapshots leave those at defaults.
-    """
-
     settings: tuple[LeverageSetting, ...]
-    user_uuid: str = ""
-    server_timestamp: int = 0
-
-
-@dataclass(frozen=True)
-class OpenOrderRow:
-    """One resting order row inside an :class:`OpenOrdersSnapshot`."""
-
-    order_id: str
-    symbol_id: int
-    leverage: int
-    price: str = ""
-    quantity: str = ""
-    remaining_qty: str = ""
-
-
-@dataclass(frozen=True)
-class OpenOrdersSnapshot:
-    """Encrypted ``NodeResponse::OpenOrdersSnapshot`` push (subscribe / UpdateLeverage refresh)."""
-
-    rows: tuple[OpenOrderRow, ...]
-    server_timestamp: int = 0
-    correlation_id: int = 0
 
 
 @dataclass(frozen=True)
