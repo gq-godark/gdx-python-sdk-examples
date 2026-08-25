@@ -12,6 +12,13 @@ from godark import Environment, GodarkClient, OrderType, Side, TimeInForce
 SYMBOL = "BTC-USDC-PERP"
 
 
+def live_mark_price() -> float:
+    raw = get_first("GODARK_E2E_PRICE", "GDX_E2E_PRICE", "GDX_LIVE_PRICE")
+    if raw:
+        return float(raw)
+    return 79_000.0
+
+
 async def main() -> int:
     load_dotenv()
 
@@ -43,15 +50,17 @@ async def main() -> int:
                 # Book confirmation waits on private order updates; subscribe first.
                 await client.subscribe(["orders"])
                 await asyncio.sleep(0.35)
+                mark = live_mark_price()
+                sell_px = round(mark * 1.03, 1)
                 ack = await client.place_order(
                     SYMBOL,
                     Side.SELL,
                     OrderType.LIMIT,
                     0.01,
-                    price=69515.2,
+                    price=sell_px,
                     time_in_force=TimeInForce.GTC,
                 )
-                print(f"Place OK — order_id={ack.order_id}")
+                print(f"Place OK — order_id={ack.order_id} (limit SELL @ {sell_px}, mark={mark})")
                 # Allow the resting order to settle before cancel (avoids CANCEL_TOO_SOON).
                 await asyncio.sleep(0.5)
                 cancel_ack = await client.cancel_order(str(ack.order_id), SYMBOL)
