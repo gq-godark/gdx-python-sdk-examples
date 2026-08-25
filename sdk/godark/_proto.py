@@ -209,9 +209,9 @@ def build_mass_quote_proto(
     (float), ``cancel_order_id`` (int|None, 0/None = pure place), ``time_in_force``
     (str, default GTC), ``expiry_time`` (int|None), ``correlation_id`` (bytes|None).
 
-    ``post_only`` is the batch-level flag: ``None`` omits it (node defaults to
-    post-only); ``False`` enables the relaxed path where a crossing leg takes
-    liquidity up to its limit and rests the remainder.
+    ``post_only`` is the batch-level flag: ``None`` encodes post-only (``True``);
+    ``False`` enables the relaxed path where a crossing leg takes liquidity up
+    to its limit and rests the remainder.
 
     Raises ``ValueError`` if ``legs`` is empty or has more than 20 entries.
     """
@@ -226,8 +226,7 @@ def build_mass_quote_proto(
     )
     if correlation_id_bytes is not None:
         mq.correlation_id = correlation_id_body_bytes(correlation_id_bytes)
-    if post_only is not None:
-        mq.post_only = post_only
+    mq.post_only = True if post_only is None else post_only
 
     for leg in legs:
         side = leg["side"]
@@ -404,7 +403,7 @@ def parse_node_response(data: bytes) -> dict[str, Any]:
             if outcome.HasField("order_status"):
                 order_status = _ORDER_STATUS_FROM_PROTO.get(outcome.order_status)
         else:
-            success = True
+            success = False
             error_code = None
             order_status = None
         result: dict[str, Any] = {

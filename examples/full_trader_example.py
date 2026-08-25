@@ -49,17 +49,7 @@ async def main() -> int:
     print(sep)
     print("Order-type support in this distribution: MARKET, LIMIT")
 
-    api_key_id = get_first("GODARK_API_KEY_ID", "GDX_API_KEY_ID")
-    api_secret = get_first("GODARK_API_SECRET", "GDX_API_SECRET")
-    passphrase = get_first("GODARK_PASSPHRASE", "GDX_PASSPHRASE")
-    if not api_key_id or not api_secret or not passphrase:
-        print(
-            "Missing GODARK_API_KEY_ID / GODARK_API_SECRET / GODARK_PASSPHRASE "
-            "(legacy GDX_* aliases are accepted).",
-            file=sys.stderr,
-        )
-        return 1
-
+    legacy_key = get_first("GODARK_API_KEY", "GDX_API_KEY")
     edge = get_first("GODARK_EDGE_URL", "GDX_EDGE_URL")
     print(f"Endpoint: {edge or Environment.TESTNET.edge_base_url}")
 
@@ -79,14 +69,31 @@ async def main() -> int:
         counts[key] += 1
 
     client_kwargs: dict = {
-        "api_key_id": api_key_id,
-        "api_secret": api_secret,
-        "passphrase": passphrase,
         "environment": Environment.TESTNET,
         "transport": transport,
     }
     if edge:
         client_kwargs["base_url"] = edge
+    if legacy_key:
+        client_kwargs["api_key"] = legacy_key
+        if uid := get_first("GODARK_USER_UUID", "GDX_USER_UUID"):
+            client_kwargs["user_uuid"] = uid
+    else:
+        api_key_id = get_first("GODARK_API_KEY_ID", "GDX_API_KEY_ID")
+        api_secret = get_first("GODARK_API_SECRET", "GDX_API_SECRET")
+        passphrase = get_first("GODARK_PASSPHRASE", "GDX_PASSPHRASE")
+        if not (api_key_id and api_secret and passphrase):
+            print(
+                "Missing GODARK_API_KEY_ID / GODARK_API_SECRET / GODARK_PASSPHRASE "
+                "or legacy GODARK_API_KEY for localnet.",
+                file=sys.stderr,
+            )
+            return 1
+        client_kwargs.update(
+            api_key_id=api_key_id,
+            api_secret=api_secret,
+            passphrase=passphrase,
+        )
 
     client = GodarkClient(**client_kwargs)
 
@@ -191,11 +198,7 @@ async def main() -> int:
 
     # Leverage updates use encrypted REST on the HPKE SDK (not the WS client).
     print("Setting leverage to 1 via GodarkRestClient.update_leverage...")
-    rest_kwargs = {
-        "api_key_id": api_key_id,
-        "api_secret": api_secret,
-        "passphrase": passphrase,
-    }
+    rest_kwargs = {k: v for k, v in client_kwargs.items() if k in ("api_key", "api_key_id", "api_secret", "passphrase", "user_uuid")}
     if edge:
         rest_kwargs["rest_base_url"] = edge.replace("wss://", "https://").replace(
             "ws://", "http://"

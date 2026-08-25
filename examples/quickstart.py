@@ -22,25 +22,30 @@ def live_mark_price() -> float:
 async def main() -> int:
     load_dotenv()
 
-    api_key_id = get_first("GODARK_API_KEY_ID", "GDX_API_KEY_ID")
-    api_secret = get_first("GODARK_API_SECRET", "GDX_API_SECRET")
-    passphrase = get_first("GODARK_PASSPHRASE", "GDX_PASSPHRASE")
-    if not api_key_id or not api_secret or not passphrase:
-        print(
-            "Missing credentials: set GODARK_API_KEY_ID, GODARK_API_SECRET and "
-            "GODARK_PASSPHRASE (legacy GDX_* aliases are accepted).",
-            file=sys.stderr,
-        )
-        return 1
-
-    client_kwargs: dict = {
-        "api_key_id": api_key_id,
-        "api_secret": api_secret,
-        "passphrase": passphrase,
-        "environment": Environment.TESTNET,
-    }
+    legacy_key = get_first("GODARK_API_KEY", "GDX_API_KEY")
+    client_kwargs: dict = {"environment": Environment.TESTNET}
     if edge := get_first("GODARK_EDGE_URL", "GDX_EDGE_URL"):
         client_kwargs["base_url"] = edge
+    if legacy_key:
+        client_kwargs["api_key"] = legacy_key
+        if uid := get_first("GODARK_USER_UUID", "GDX_USER_UUID"):
+            client_kwargs["user_uuid"] = uid
+    else:
+        api_key_id = get_first("GODARK_API_KEY_ID", "GDX_API_KEY_ID")
+        api_secret = get_first("GODARK_API_SECRET", "GDX_API_SECRET")
+        passphrase = get_first("GODARK_PASSPHRASE", "GDX_PASSPHRASE")
+        if not (api_key_id and api_secret and passphrase):
+            print(
+                "Missing credentials: set GODARK_API_KEY_ID/GODARK_API_SECRET/GODARK_PASSPHRASE "
+                "or legacy GODARK_API_KEY for localnet.",
+                file=sys.stderr,
+            )
+            return 1
+        client_kwargs.update(
+            api_key_id=api_key_id,
+            api_secret=api_secret,
+            passphrase=passphrase,
+        )
 
     try:
         async with GodarkClient(**client_kwargs) as client:

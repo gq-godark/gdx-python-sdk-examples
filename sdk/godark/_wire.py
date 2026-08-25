@@ -99,8 +99,13 @@ def encrypted_push_to_json(push: edge_pb2.EncryptedEdgeResponse) -> dict[str, An
 
 
 def decode_binary_frame(data: bytes) -> tuple[DecodedBinary, Any]:
+    from google.protobuf.message import DecodeError
+
     frame = edge_pb2.TradingWsBinaryFrame()
-    frame.ParseFromString(data)
+    try:
+        frame.ParseFromString(data)
+    except DecodeError:
+        return DecodedBinary.IGNORED, None
     body = frame.WhichOneof("body")
     if body == "encrypted_push":
         return DecodedBinary.ENCRYPTED_PUSH, frame.encrypted_push

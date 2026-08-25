@@ -148,13 +148,24 @@ _REQUEST_TYPE_TO_PROTO: dict[str, int] = {
     "cancel": 2,
     "modify": 3,
     "subscribe": 4,
+    # Legacy alias; wire value is GET_OPEN_ORDERS.
     "signing": 5,
-    "get_open_orders": 6,
+    "get_open_orders": 5,
+    # Legacy alias; wire value is ADJUST_MARGIN.
     "get_order_history": 7,
-    "update_leverage": 8,
-    "mass_quote": 10,
-    "batch_cancel": 11,
-    "batch_modify": 12,
+    "adjust_margin": 7,
+    "update_leverage": 6,
+    "mass_quote": 8,
+    "batch_cancel": 9,
+    "batch_modify": 10,
+    "cancel_tpsl": 11,
+    "amend_tpsl": 12,
+    "update_margin_mode": 13,
+    "get_positions": 14,
+    "get_account": 15,
+    "cancel_all": 16,
+    "close_all": 17,
+    "reverse": 18,
 }
 
 _RESPONSE_MESSAGE_TYPE_TO_PROTO: dict[str, int] = {

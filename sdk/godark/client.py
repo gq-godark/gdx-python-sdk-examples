@@ -835,10 +835,23 @@ class GodarkClient:
             raise SessionError(f"HPKE setup failed: {exc}") from exc
         from ._wire import encode_hpke_setup
 
-        frame = encode_hpke_setup(user.bytes, self._conn_id, encapped)
-        reply = await self._transport.send_hpke_setup(frame)
-        if reply.get("established") is not True:
-            raise SessionError("HPKE setup not established")
+        try:
+            frame = encode_hpke_setup(user.bytes, self._conn_id, encapped)
+            reply = await self._transport.send_hpke_setup(frame)
+            if reply.get("established") is not True:
+                raise SessionError("HPKE setup not established")
+            reply_conn_id = reply.get("conn_id")
+            if reply_conn_id != self._conn_id:
+                raise SessionError(
+                    f"HPKE setup conn_id mismatch: expected {self._conn_id}, got {reply_conn_id}"
+                )
+            self._session.establish()
+        except SessionError:
+            self._session.abort_setup()
+            raise
+        except Exception as exc:
+            self._session.abort_setup()
+            raise SessionError(f"HPKE setup failed: {exc}") from exc
         logger.info("HPKE session established (conn_id=%s)", self._conn_id)
 
     # ------------------------------------------------------------------
@@ -970,6 +983,12 @@ class GodarkClient:
 
         parsed = _proto.parse_mass_quote_ack(plaintext)
         if parsed.get("type") != "mass_quote_ack":
+            reject = _proto.parse_node_response(plaintext)
+            if reject.get("type") == "ack" and not reject.get("success", True):
+                raise make_order_error_from_json(
+                    reject.get("reject_text") or reject.get("message"),
+                    str(reject["error_code"]) if reject.get("error_code") is not None else None,
+                )
             raise OrderError(f"Expected mass_quote_ack, got {parsed.get('type')}")
 
         results = [
@@ -1003,6 +1022,12 @@ class GodarkClient:
 
         parsed = _proto.parse_batch_cancel_ack(plaintext)
         if parsed.get("type") != "batch_cancel_ack":
+            reject = _proto.parse_node_response(plaintext)
+            if reject.get("type") == "ack" and not reject.get("success", True):
+                raise make_order_error_from_json(
+                    reject.get("reject_text") or reject.get("message"),
+                    str(reject["error_code"]) if reject.get("error_code") is not None else None,
+                )
             raise OrderError(f"Expected batch_cancel_ack, got {parsed.get('type')}")
 
         results = [
@@ -1031,6 +1056,12 @@ class GodarkClient:
 
         parsed = _proto.parse_batch_modify_ack(plaintext)
         if parsed.get("type") != "batch_modify_ack":
+            reject = _proto.parse_node_response(plaintext)
+            if reject.get("type") == "ack" and not reject.get("success", True):
+                raise make_order_error_from_json(
+                    reject.get("reject_text") or reject.get("message"),
+                    str(reject["error_code"]) if reject.get("error_code") is not None else None,
+                )
             raise OrderError(f"Expected batch_modify_ack, got {parsed.get('type')}")
 
         results = [
@@ -1105,25 +1136,14 @@ class GodarkClient:
         message_type = msg.get("message_type", "")
 
         if message_type in ("ack", "mass_quote_ack", "batch_cancel_ack", "batch_modify_ack"):
-            # Only resolve the in-flight command if this ack is the kind it is
-            # waiting for. A mass_quote awaits "mass_quote_ack"; an async order
-            # "ack" pushed while it is in flight must not resolve it early
-            # (that surfaced as "Expected mass_quote_ack, got ack"). With
-            # concurrent commands the expected type is looked up by the ack's
-            # correlation id; when absent we fall back to the single-slot field
-            # and finally to legacy resolve-any.
-            corr_key = self._transport._normalize_correlation_key(msg.get("correlation_id"))
-            expected = self._expected_ack_by_correlation.get(corr_key) if corr_key else None
-            if expected is None:
-                expected = self._inflight_response_type
-            if expected is None or message_type == expected:
-                try:
-                    # Decrypt before resolving the waiter: a later push must
-                    # never consume this transport nonce first.
-                    msg["_decrypted_plaintext"] = self._decrypt_push_body(msg, message_type)
-                except Exception as e:
-                    msg["_decrypt_error"] = str(e)
-                self._transport.resolve_command(msg)
+            # Resolve the in-flight command for any encrypted ack whose correlation
+            # id matches the waiter (matches Go/Rust). Reject acks for batch ops
+            # must surface to the caller instead of timing out.
+            try:
+                msg["_decrypted_plaintext"] = self._decrypt_push_body(msg, message_type)
+            except Exception as e:
+                msg["_decrypt_error"] = str(e)
+            self._transport.resolve_command(msg)
             return
 
         # Skip push types we don't have an AAD enum value for. The server
