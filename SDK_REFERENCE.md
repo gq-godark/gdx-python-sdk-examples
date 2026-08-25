@@ -5,7 +5,7 @@ distribution in this repository.
 
 The MM examples use WebSocket encrypted trading via `godark.GodarkClient`.
 Encrypted REST trading is not supported — all order flow (place / modify /
-cancel / mass-quote) runs over the Noise XK WebSocket client. Standalone
+cancel / mass-quote) runs over the HPKE WebSocket client. Standalone
 market-data clients exist in the upstream SDK but are excluded from this
 distribution.
 
@@ -61,7 +61,7 @@ helper loads it from the repo root; OS environment variables win over `.env` val
 
 | Method | Signature | Purpose |
 |--------|-----------|---------|
-| `connect` | `async def connect() -> None` | Authenticate and establish Noise XK encrypted WebSocket session |
+| `connect` | `async def connect() -> None` | Authenticate and establish HPKE WebSocket session |
 | `disconnect` | `async def disconnect() -> None` | Graceful disconnect; cancels pending reconnect tasks |
 | `logout` | `async def logout() -> None` | Send docs `op: logout` when supported, then disconnect |
 | `__aenter__` / `__aexit__` | `async with GodarkClient(...) as c:` | Async-context wrapper around `connect()` / `disconnect()` |
@@ -282,7 +282,7 @@ built-in `Exception`):
 ```text
 GodarkError
 ├── AuthenticationError   # API key / handshake auth failed
-├── SessionError          # Noise XK handshake or rekey failed
+├── SessionError          # HPKE setup handshake or rekey failed
 ├── OrderError            # sequencer rejected the order; carries .error_code
 ├── ConnectionError       # WebSocket transport / not-connected guard
 ├── EncryptionError       # AES-GCM encryption / decryption failed
@@ -345,7 +345,7 @@ sdk/
 ├── shared/symbols.json
 └── godark/
     ├── __init__.py           # public re-exports
-    ├── client.py             # GodarkClient: pushes + Noise XK encrypted trading
+    ├── client.py             # GodarkClient: pushes + HPKE encrypted trading
     ├── enums.py
     ├── types.py
     ├── errors.py

@@ -2,7 +2,7 @@
 """Minimal GodarkRestClient demo — auth + account reads + public market data.
 
 Encrypted place/cancel/modify/update_leverage require GodarkClient (WebSocket /
-Noise XK); see quickstart.py / full_trader_example.py.
+HPKE); see quickstart.py / full_trader_example.py.
 
   cd examples && python rest_client_example.py
 
@@ -77,7 +77,7 @@ async def main() -> int:
             print(f"get_my_balance skipped: {exc}")
 
         print("REST reads succeeded.")
-        print("Encrypted trading requires GodarkClient over WebSocket (Noise XK).")
+        print("Encrypted trading requires GodarkClient over WebSocket (HPKE).")
     except Exception as exc:
         print(f"{exc}", file=sys.stderr)
         return 1
