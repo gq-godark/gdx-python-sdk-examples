@@ -21,7 +21,6 @@ from .enums import (  # noqa: E402
     _ORDER_STATUS_FROM_PROTO,
     _ORDER_TYPE_TO_PROTO,
     _ORDER_UPDATE_TYPE_FROM_PROTO,
-    _POSITION_UPDATE_TYPE_FROM_PROTO,
     _REQUEST_TYPE_TO_PROTO,
     _RESPONSE_MESSAGE_TYPE_TO_PROTO,
     _SIDE_FROM_PROTO,
@@ -31,18 +30,11 @@ from .enums import (  # noqa: E402
 from .types import (  # noqa: E402
     BalanceUpdate,
     FundingRateUpdate,
-    LeverageSetting,
-    LeverageSettings,
-    MarginAlert,
-    OpenOrderRow,
-    OpenOrdersSnapshot,
     OrderUpdate,
     PositionRow,
     PositionsSnapshot,
     PositionsSnapshotSource,
     PositionUpdate,
-    SettlementBatchStatus,
-    SettlementUpdate,
     SystemHealthUpdate,
     UnknownSequencerPush,
 )
@@ -115,11 +107,10 @@ def build_place_order_proto(
     correlation_id_bytes: bytes | None = None,
     timestamp: int = 0,
 ) -> bytes:
-    """Build a PlaceOrderInput wrapped in EdgeSequencerRequest, return serialized bytes.
-
-    Per-symbol leverage is account state set via :func:`build_update_leverage_proto`;
-    place orders inherit the sequencer-stored setting (not a client field).
-    """
+    """Build a PlaceOrderInput wrapped in EdgeSequencerRequest, return serialized bytes."""
+    del timestamp  # legacy param; PlaceOrderInput no longer carries timestamp
+    if aon and min_fill_size is None:
+        min_fill_size = quantity
     place = sequencer_pb2.PlaceOrderInput(
         symbol_id=symbol_id,
         side=_SIDE_TO_PROTO[side if isinstance(side, str) else side.value],
@@ -127,12 +118,9 @@ def build_place_order_proto(
             order_type if isinstance(order_type, str) else order_type.value
         ],
         quantity=quantity,
-        user_commitment=b"",
         time_in_force=_TIME_IN_FORCE_TO_PROTO[
             time_in_force if isinstance(time_in_force, str) else time_in_force.value
         ],
-        aon=aon,
-        timestamp=timestamp,
         user_uuid=user_uuid,
     )
     if price is not None:
@@ -154,12 +142,12 @@ def build_cancel_order_proto(
     symbol_id: int,
     correlation_id_bytes: bytes,
 ) -> bytes:
-    """Build a CancelMessage wrapped in EdgeSequencerRequest, return serialized bytes."""
-    cancel = sequencer_pb2.CancelMessage(
+    """Build a CancelOrderInput wrapped in EdgeSequencerRequest, return serialized bytes."""
+    cancel = sequencer_pb2.CancelOrderInput(
         order_id=order_id,
-        user_commitment=b"\x00" * 32,
         symbol_id=symbol_id,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
+        user_uuid=user_uuid,
     )
     req = sequencer_pb2.EdgeSequencerRequest(cancel=cancel)
     return req.SerializeToString()
@@ -176,7 +164,6 @@ def build_modify_order_proto(
     """Build a ModifyOrderInput wrapped in EdgeSequencerRequest, return serialized bytes."""
     modify = sequencer_pb2.ModifyOrderInput(
         order_id=order_id,
-        user_commitment=b"",
         symbol_id=symbol_id,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
         user_uuid=user_uuid,
@@ -213,6 +200,7 @@ def build_mass_quote_proto(
     user_uuid: bytes,
     legs: list[dict[str, Any]],
     correlation_id_bytes: bytes | None = None,
+    leverage: int = 1,
     post_only: bool | None = None,
 ) -> bytes:
     """Build a MassQuoteInput wrapped in EdgeSequencerRequest, return serialized bytes.
@@ -221,28 +209,24 @@ def build_mass_quote_proto(
     (float), ``cancel_order_id`` (int|None, 0/None = pure place), ``time_in_force``
     (str, default GTC), ``expiry_time`` (int|None), ``correlation_id`` (bytes|None).
 
-    Per-symbol leverage is account state set via :func:`build_update_leverage_proto`;
-    mass-quote legs inherit the sequencer-stored setting (not a client field).
-
-    ``post_only`` is the batch-level flag: ``None`` omits it (node defaults to
-    post-only); ``False`` enables the relaxed path where a crossing leg takes
-    liquidity up to its limit and rests the remainder.
+    ``post_only`` is the batch-level flag: ``None`` encodes post-only (``True``);
+    ``False`` enables the relaxed path where a crossing leg takes liquidity up
+    to its limit and rests the remainder.
 
     Raises ``ValueError`` if ``legs`` is empty or has more than 20 entries.
     """
+    del leverage  # legacy param; MassQuoteInput no longer carries leverage
     if not legs:
         raise ValueError("mass quote requires at least one leg")
     if len(legs) > _MAX_BATCH_LEGS:
         raise ValueError(f"mass quote accepts at most {_MAX_BATCH_LEGS} legs, got {len(legs)}")
     mq = sequencer_pb2.MassQuoteInput(
         symbol_id=symbol_id,
-        user_commitment=b"",
         user_uuid=user_uuid,
     )
     if correlation_id_bytes is not None:
         mq.correlation_id = correlation_id_body_bytes(correlation_id_bytes)
-    if post_only is not None:
-        mq.post_only = post_only
+    mq.post_only = True if post_only is None else post_only
 
     for leg in legs:
         side = leg["side"]
@@ -289,7 +273,6 @@ def build_batch_cancel_proto(
         )
     bc = sequencer_pb2.BatchCancelInput(
         symbol_id=symbol_id,
-        user_commitment=b"",
         user_uuid=user_uuid,
         order_ids=[int(oid) for oid in order_ids],
     )
@@ -328,7 +311,6 @@ def build_batch_modify_proto(
             raise ValueError(f"batch modify leg {i} must set new_price and/or new_quantity")
     bm = sequencer_pb2.BatchModifyInput(
         symbol_id=symbol_id,
-        user_commitment=b"",
         user_uuid=user_uuid,
     )
     if correlation_id_bytes is not None:
@@ -409,22 +391,34 @@ def parse_node_response(data: bytes) -> dict[str, Any]:
     which = resp.WhichOneof("inner")
     if which == "ack":
         ack = resp.ack
+        outcome = ack.ack_outcome
+        if outcome and outcome.kind:
+            success = outcome.kind == sequencer_pb2.ACK_OUTCOME_KIND_APPLIED
+            error_code = None
+            if outcome.HasField("business_error_code"):
+                error_code = outcome.business_error_code
+            elif outcome.HasField("system_error_code"):
+                error_code = outcome.system_error_code
+            order_status = None
+            if outcome.HasField("order_status"):
+                order_status = _ORDER_STATUS_FROM_PROTO.get(outcome.order_status)
+        else:
+            success = False
+            error_code = None
+            order_status = None
         result: dict[str, Any] = {
             "type": "ack",
-            "node_id": ack.node_id,
             "sequence": ack.sequence,
             "order_id": ack.order_id,
-            "success": ack.success,
+            "success": success,
             "correlation_id": ack.correlation_id,
         }
-        if ack.HasField("error_code"):
-            result["error_code"] = ack.error_code
+        if error_code is not None:
+            result["error_code"] = error_code
         if ack.HasField("reject_text"):
             result["reject_text"] = ack.reject_text
-        if ack.HasField("order_status"):
-            result["order_status"] = _ORDER_STATUS_FROM_PROTO.get(ack.order_status)
-        if ack.HasField("node_health"):
-            result["node_health"] = ack.node_health
+        if order_status is not None:
+            result["order_status"] = order_status
         return result
     elif which == "fill":
         fill = resp.fill
@@ -433,43 +427,14 @@ def parse_node_response(data: bytes) -> dict[str, Any]:
             "trade_id": fill.trade_id,
             "taker_order_id": fill.taker_order_id,
             "maker_order_id": fill.maker_order_id,
-            "maker_user_commitment": fill.maker_user_commitment,
             "symbol_id": fill.symbol_id,
             "timestamp": fill.timestamp,
             "correlation_id": fill.correlation_id,
         }
     elif which == "signing":
         return {"type": "signing"}
-    elif which == "open_orders_snapshot":
-        return {"type": "open_orders_snapshot", "snapshot": resp.open_orders_snapshot}
     else:
         return {"type": "unknown"}
-
-
-def parse_open_orders_snapshot(data: bytes) -> OpenOrdersSnapshot:
-    """Decode a NodeResponse carrying OpenOrdersSnapshot."""
-    resp = sequencer_pb2.NodeResponse()
-    resp.ParseFromString(data)
-    which = resp.WhichOneof("inner")
-    if which != "open_orders_snapshot":
-        raise ValueError(f"expected NodeResponse.open_orders_snapshot, got {which}")
-    snap = resp.open_orders_snapshot
-    rows = tuple(
-        OpenOrderRow(
-            order_id=str(row.order_id),
-            symbol_id=int(row.symbol_id),
-            leverage=int(row.leverage),
-            price=str(row.price),
-            quantity=str(row.quantity),
-            remaining_qty=str(row.remaining_qty),
-        )
-        for row in snap.rows
-    )
-    return OpenOrdersSnapshot(
-        rows=rows,
-        server_timestamp=int(snap.server_timestamp),
-        correlation_id=_correlation_id_to_int(snap.correlation_id),
-    )
 
 
 _MASS_QUOTE_LEG_STATUS_FROM_PROTO: dict[int, str] = {
@@ -623,30 +588,6 @@ def parse_order_update_proto(data: bytes) -> OrderUpdate:
     )
 
 
-def parse_position_update_proto(data: bytes) -> PositionUpdate:
-    """Decode a PositionUpdateMessage protobuf into a PositionUpdate dataclass."""
-    msg = sequencer_pb2.PositionUpdateMessage()
-    msg.ParseFromString(data)
-
-    from .enums import PositionUpdateType, Side
-
-    return PositionUpdate(
-        user_uuid=_uuid_bytes_to_str(msg.user_uuid),
-        symbol_id=int(msg.symbol_id),
-        side=_SIDE_FROM_PROTO.get(msg.side, Side.BUY),
-        update_type=_POSITION_UPDATE_TYPE_FROM_PROTO.get(
-            msg.update_type, PositionUpdateType.SNAPSHOT
-        ),
-        size=msg.size,
-        entry_price=msg.entry_price,
-        previous_size=msg.previous_size,
-        fill_price=msg.fill_price,
-        fill_qty=msg.fill_qty,
-        correlation_id=_correlation_id_to_int(msg.correlation_id),
-        timestamp=int(msg.timestamp),
-    )
-
-
 def _parse_positions_snapshot_source(value: int) -> PositionsSnapshotSource:
     if value == 1:
         return PositionsSnapshotSource.INITIAL
@@ -655,16 +596,6 @@ def _parse_positions_snapshot_source(value: int) -> PositionsSnapshotSource:
     if value == 3:
         return PositionsSnapshotSource.EVENT
     return PositionsSnapshotSource.UNSPECIFIED
-
-
-def _parse_settlement_batch_status(value: int) -> SettlementBatchStatus:
-    if value == 1:
-        return SettlementBatchStatus.SUBMITTED
-    if value == 2:
-        return SettlementBatchStatus.CONFIRMED
-    if value == 3:
-        return SettlementBatchStatus.FAILED
-    return SettlementBatchStatus.UNSPECIFIED
 
 
 def parse_position_row_proto(row: sequencer_pb2.PositionRow) -> PositionRow:
@@ -720,22 +651,11 @@ def parse_system_health_proto(msg: health_pb2.HealthReport) -> SystemHealthUpdat
 def parse_balance_update_proto(msg: sequencer_pb2.BalanceUpdateMessage) -> BalanceUpdate:
     return BalanceUpdate(
         user_uuid=_uuid_bytes_to_str(msg.user_uuid),
-        shielded_balance_raw=int(msg.shielded_balance_raw),
+        balance_raw=int(msg.balance_raw),
         timestamp=int(msg.timestamp),
-    )
-
-
-def parse_margin_alert_proto(msg: sequencer_pb2.MarginAlertMessage) -> MarginAlert:
-    return MarginAlert(
-        owner=_uuid_bytes_to_str(msg.owner),
-        symbol_id=int(msg.symbol_id),
-        tier=int(msg.tier),
-        margin_ratio_bps=int(msg.margin_ratio_bps),
-        mark_price=msg.mark_price,
-        liquidation_price=msg.liquidation_price,
-        ts=int(msg.ts),
-        state_version=int(msg.state_version),
-        recovered=bool(msg.recovered),
+        balance=msg.balance,
+        signed_balance_8dp=int(msg.signed_balance_8dp),
+        free_collateral_8dp=int(msg.free_collateral_8dp),
     )
 
 
@@ -751,38 +671,13 @@ def parse_funding_rate_update_proto(
     )
 
 
-def parse_settlement_update_proto(msg: sequencer_pb2.SettlementUpdateMessage) -> SettlementUpdate:
-    affected = tuple(_uuid_bytes_to_str(b) for b in msg.affected_user_uuids)
-    return SettlementUpdate(
-        batch_id=int(msg.batch_id),
-        status=_parse_settlement_batch_status(int(msg.status)),
-        tx_signature=msg.tx_signature,
-        timestamp=int(msg.timestamp),
-        affected_user_uuids=affected,
-    )
-
-
-def parse_leverage_settings_proto(msg: sequencer_pb2.LeverageSettings) -> LeverageSettings:
-    rows = tuple(
-        LeverageSetting(symbol_id=int(r.symbol_id), leverage=int(r.leverage)) for r in msg.settings
-    )
-    return LeverageSettings(
-        settings=rows,
-        user_uuid=_uuid_bytes_to_str(msg.user_uuid),
-        server_timestamp=int(msg.server_timestamp),
-    )
-
-
 SequencerPush: TypeAlias = (
     OrderUpdate
     | PositionUpdate
     | PositionsSnapshot
     | SystemHealthUpdate
     | BalanceUpdate
-    | MarginAlert
     | FundingRateUpdate
-    | SettlementUpdate
-    | LeverageSettings
     | UnknownSequencerPush
 )
 
@@ -795,20 +690,12 @@ def parse_sequencer_to_edge_message(data: bytes) -> SequencerPush:
     which = msg.WhichOneof("inner")
     if which == "order_update":
         return parse_order_update_proto(msg.order_update.SerializeToString())
-    if which == "position_update":
-        return parse_position_update_proto(msg.position_update.SerializeToString())
     if which == "positions_snapshot":
         return parse_positions_snapshot_proto(msg.positions_snapshot)
     if which == "health_report":
         return parse_system_health_proto(msg.health_report)
-    if which == "settlement_update":
-        return parse_settlement_update_proto(msg.settlement_update)
     if which == "funding_rate_update":
         return parse_funding_rate_update_proto(msg.funding_rate_update)
     if which == "balance_update":
         return parse_balance_update_proto(msg.balance_update)
-    if which == "margin_alert":
-        return parse_margin_alert_proto(msg.margin_alert)
-    if which == "leverage_settings":
-        return parse_leverage_settings_proto(msg.leverage_settings)
     return UnknownSequencerPush(oneof_field=which)

@@ -18,6 +18,7 @@ from godark import (
     Environment,
     FundingRateUpdate,
     GodarkClient,
+    GodarkRestClient,
     MarginAlert,
     OrderType,
     OrderUpdate,
@@ -33,6 +34,13 @@ from godark import (
 SYMBOL = "BTC-USDC-PERP"
 
 
+def live_mark_price() -> float:
+    raw = get_first("GODARK_E2E_PRICE", "GDX_E2E_PRICE", "GDX_LIVE_PRICE")
+    if raw:
+        return float(raw)
+    return 79_000.0
+
+
 async def main() -> int:
     load_dotenv()
     sep = "=" * 60
@@ -41,17 +49,7 @@ async def main() -> int:
     print(sep)
     print("Order-type support in this distribution: MARKET, LIMIT")
 
-    api_key_id = get_first("GODARK_API_KEY_ID", "GDX_API_KEY_ID")
-    api_secret = get_first("GODARK_API_SECRET", "GDX_API_SECRET")
-    passphrase = get_first("GODARK_PASSPHRASE", "GDX_PASSPHRASE")
-    if not api_key_id or not api_secret or not passphrase:
-        print(
-            "Missing GODARK_API_KEY_ID / GODARK_API_SECRET / GODARK_PASSPHRASE "
-            "(legacy GDX_* aliases are accepted).",
-            file=sys.stderr,
-        )
-        return 1
-
+    legacy_key = get_first("GODARK_API_KEY", "GDX_API_KEY")
     edge = get_first("GODARK_EDGE_URL", "GDX_EDGE_URL")
     print(f"Endpoint: {edge or Environment.TESTNET.edge_base_url}")
 
@@ -71,14 +69,31 @@ async def main() -> int:
         counts[key] += 1
 
     client_kwargs: dict = {
-        "api_key_id": api_key_id,
-        "api_secret": api_secret,
-        "passphrase": passphrase,
         "environment": Environment.TESTNET,
         "transport": transport,
     }
     if edge:
         client_kwargs["base_url"] = edge
+    if legacy_key:
+        client_kwargs["api_key"] = legacy_key
+        if uid := get_first("GODARK_USER_UUID", "GDX_USER_UUID"):
+            client_kwargs["user_uuid"] = uid
+    else:
+        api_key_id = get_first("GODARK_API_KEY_ID", "GDX_API_KEY_ID")
+        api_secret = get_first("GODARK_API_SECRET", "GDX_API_SECRET")
+        passphrase = get_first("GODARK_PASSPHRASE", "GDX_PASSPHRASE")
+        if not (api_key_id and api_secret and passphrase):
+            print(
+                "Missing GODARK_API_KEY_ID / GODARK_API_SECRET / GODARK_PASSPHRASE "
+                "or legacy GODARK_API_KEY for localnet.",
+                file=sys.stderr,
+            )
+            return 1
+        client_kwargs.update(
+            api_key_id=api_key_id,
+            api_secret=api_secret,
+            passphrase=passphrase,
+        )
 
     client = GodarkClient(**client_kwargs)
 
@@ -127,7 +142,7 @@ async def main() -> int:
 
     def on_bal(b: BalanceUpdate) -> None:
         bump("balance_update")
-        print(f"BAL    shielded_raw={b.shielded_balance_raw}", flush=True)
+        print(f"BAL    balance_raw={b.balance_raw}", flush=True)
 
     def on_margin(a: MarginAlert) -> None:
         bump("margin_alert")
@@ -181,15 +196,22 @@ async def main() -> int:
     print("Subscribed to order + position updates")
     await asyncio.sleep(0.35)
 
-    # Leverage is per-symbol account state (not a place/mass_quote field).
-    print("Setting leverage to 1 via update_leverage...")
+    # Leverage updates use encrypted REST on the HPKE SDK (not the WS client).
+    print("Setting leverage to 1 via GodarkRestClient.update_leverage...")
+    rest_kwargs = {k: v for k, v in client_kwargs.items() if k in ("api_key", "api_key_id", "api_secret", "passphrase", "user_uuid")}
+    if edge:
+        rest_kwargs["rest_base_url"] = edge.replace("wss://", "https://").replace(
+            "ws://", "http://"
+        ).removesuffix("/ws/v1")
     try:
-        lev_ack = await client.update_leverage(SYMBOL, 1)
-        print(f"update_leverage: success={lev_ack.success} order_id={lev_ack.order_id}")
+        async with GodarkRestClient(**rest_kwargs) as rest:
+            await rest.connect()
+            lev_ack = await rest.update_leverage(SYMBOL, 1)
+            print(
+                f"update_leverage: success={lev_ack.success} order_id={lev_ack.order_id}"
+            )
     except Exception as e:
         print_order_error("update_leverage rejected", e)
-        await client.disconnect()
-        return 1
 
     def drain_orders(label: str) -> None:
         n = len(order_events)
@@ -203,14 +225,16 @@ async def main() -> int:
         if n:
             print(f"  ({n} order update(s) {label})")
 
-    print("Placing limit BUY @ 67500...")
+    mark = live_mark_price()
+    buy_px = round(mark * 0.997, 1)
+    print(f"Placing limit BUY @ {buy_px} (mark={mark})...")
     try:
         buy_ack = await client.place_order(
             SYMBOL,
             Side.BUY,
             OrderType.LIMIT,
             0.1,
-            price=67_500.0,
+            price=buy_px,
             time_in_force=TimeInForce.GTC,
         )
         print(f"BUY placed: order_id={buy_ack.order_id}  sequence={buy_ack.sequence}")
@@ -222,11 +246,12 @@ async def main() -> int:
     await asyncio.sleep(1)
     drain_orders("after BUY")
 
-    print("Modifying order price to 68000...")
+    modify_px = round(mark * 0.996, 1)
+    print(f"Modifying order price to {modify_px}...")
     assert buy_ack is not None
     try:
         mod_ack = await client.modify_order(
-            str(buy_ack.order_id), SYMBOL, new_price=68_000.0
+            str(buy_ack.order_id), SYMBOL, new_price=modify_px
         )
         print(f"Modified: order_id={mod_ack.order_id}")
     except Exception as e:
@@ -235,14 +260,15 @@ async def main() -> int:
     await asyncio.sleep(1)
     drain_orders("after MODIFY")
 
-    print("Placing limit SELL @ 95000...")
+    sell_px = round(mark * 1.03, 1)
+    print(f"Placing limit SELL @ {sell_px}...")
     try:
         sell_ack = await client.place_order(
             SYMBOL,
             Side.SELL,
             OrderType.LIMIT,
             0.05,
-            price=95_000.0,
+            price=sell_px,
             time_in_force=TimeInForce.GTC,
         )
         print(f"SELL placed: order_id={sell_ack.order_id}")

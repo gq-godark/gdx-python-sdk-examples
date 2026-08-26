@@ -5,7 +5,7 @@ distribution in this repository.
 
 The MM examples use WebSocket encrypted trading via `godark.GodarkClient`.
 Encrypted REST trading is not supported — all order flow (place / modify /
-cancel / mass-quote) runs over the Noise XK WebSocket client. Standalone
+cancel / mass-quote) runs over the HPKE WebSocket client. Standalone
 market-data examples are excluded from this distribution.
 
 Order placement support in this MM distribution is limited to `MARKET` and
@@ -51,7 +51,7 @@ Use `.env.example` as the template for your local `.env`.
 
 | Method | Signature | Purpose |
 |--------|-----------|---------|
-| `connect` | `async def connect() -> None` | Authenticate and establish Noise XK encrypted session |
+| `connect` | `async def connect() -> None` | Authenticate and establish HPKE encrypted session |
 | `disconnect` | `async def disconnect() -> None` | Graceful disconnect |
 | `logout` | `async def logout() -> None` | Logout and disconnect |
 | `__aenter__` / `__aexit__` | `async with GodarkClient(...) as c:` | Async-context wrapper around `connect()` / `disconnect()` |

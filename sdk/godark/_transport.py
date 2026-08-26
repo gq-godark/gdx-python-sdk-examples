@@ -16,6 +16,7 @@ from typing import Any
 import websockets
 from websockets.asyncio.client import ClientConnection
 
+from ._wire import DecodedBinary, decode_binary_frame, encrypted_push_to_json
 from .errors import TimeoutError as GdxTimeoutError
 
 logger = logging.getLogger("godark.transport")
@@ -192,9 +193,7 @@ class TransportConfig:
     additional_headers: Mapping[str, str] | None = None
     proxy: str | bool | None = True
     open_timeout: float | None = None
-    # Match Java/Go trading default: open_orders_snapshot frames grow with resting
-    # order count and routinely exceed the historical websockets 64 KiB default.
-    max_size: int | None = 8 * 1024 * 1024
+    max_size: int | None = 65536
     heartbeat_interval: float | None = None
     stale_timeout: float | None = None
     command_timeout: float | None = None
@@ -253,6 +252,7 @@ class EdgeTransport:
         self._pending_by_wire_id: dict[str, asyncio.Future] = {}
         self._cmd_lock = asyncio.Lock()
         self._use_docs_wire: bool = self._config.use_docs_wire
+        self._hpke_setup_future: asyncio.Future | None = None
 
         # Subscription waiters
         self._sub_waiter: asyncio.Future | None = None
@@ -295,9 +295,7 @@ class EdgeTransport:
 
     def _connect_kwargs(self) -> dict[str, Any]:
         kw: dict[str, Any] = {
-            "max_size": self._config.max_size
-            if self._config.max_size is not None
-            else 8 * 1024 * 1024,
+            "max_size": self._config.max_size if self._config.max_size is not None else 65536,
         }
         if self._config.ssl is not None:
             kw["ssl"] = self._config.ssl
@@ -333,6 +331,12 @@ class EdgeTransport:
         if not self._ws:
             raise RuntimeError("Not connected")
         await self._ws.send(json.dumps(obj))
+
+    async def send_binary(self, data: bytes) -> None:
+        """Send a binary WebSocket frame."""
+        if not self._ws:
+            raise RuntimeError("Not connected")
+        await self._ws.send(data)
 
     @staticmethod
     def _command_correlation_id(payload: dict) -> str:
@@ -433,6 +437,59 @@ class EdgeTransport:
             elif self._cmd_future is fut:
                 self._cmd_future = None
 
+    async def send_hpke_setup(self, frame: bytes) -> dict:
+        """Send an HPKE setup binary frame and await the setup reply."""
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        self._hpke_setup_future = fut
+        try:
+            await self.send_binary(frame)
+            return await asyncio.wait_for(fut, timeout=self._command_timeout)
+        except asyncio.TimeoutError:
+            raise GdxTimeoutError("HPKE setup timed out") from None
+        finally:
+            if self._hpke_setup_future is fut:
+                self._hpke_setup_future = None
+
+    async def send_binary_command(
+        self,
+        *,
+        prepare: Callable[[], bytes],
+        correlation_id: str = "",
+    ) -> dict:
+        """Send a binary trading command and wait for its encrypted_push ack."""
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        corr = correlation_id.lower() if correlation_id else ""
+        async with self._cmd_lock:
+            if not self._ws:
+                raise RuntimeError("Not connected")
+            frame = prepare()
+            if corr:
+                existing = self._pending_by_correlation.get(corr)
+                if existing is not None and not existing.done():
+                    existing.set_exception(RuntimeError("superseded by duplicate correlation id"))
+                self._pending_by_correlation[corr] = fut
+            else:
+                self._cmd_future = fut
+            try:
+                await self.send_binary(frame)
+            except Exception:
+                if corr:
+                    self._pending_by_correlation.pop(corr, None)
+                elif self._cmd_future is fut:
+                    self._cmd_future = None
+                raise
+        try:
+            return await asyncio.wait_for(fut, timeout=self._command_timeout)
+        except asyncio.TimeoutError:
+            raise GdxTimeoutError(f"Command timed out after {self._command_timeout:.0f}s") from None
+        finally:
+            if corr:
+                self._pending_by_correlation.pop(corr, None)
+            elif self._cmd_future is fut:
+                self._cmd_future = None
+
     async def _send_serialized(self, payload: dict, loop: asyncio.AbstractEventLoop) -> dict:
         async with self._cmd_lock:
             if not self._ws:
@@ -508,29 +565,7 @@ class EdgeTransport:
 
     @staticmethod
     def _normalize_correlation_key(corr: Any) -> str:
-        """Canonical hex key for correlation waiters.
-
-        Outbound headers stamp 32-char hex; encrypted ack pushes often echo the
-        same u128 as a decimal string. Normalize both to lowercase hex so
-        ``resolve_command`` can match concurrent waiters.
-        """
-        if isinstance(corr, int):
-            if corr < 0:
-                return ""
-            return corr.to_bytes(16, "big").hex()
-        if not isinstance(corr, str) or not corr:
-            return ""
-        s = corr.strip().lower()
-        if not s:
-            return ""
-        if s.isdigit():
-            try:
-                return int(s).to_bytes(16, "big").hex()
-            except (OverflowError, ValueError):
-                return s
-        if len(s) == 32 and all(c in "0123456789abcdef" for c in s):
-            return s
-        return s
+        return corr.lower() if isinstance(corr, str) and corr else ""
 
     def resolve_command(self, result: dict) -> bool:
         """Resolve the pending command future with the given result.
@@ -584,15 +619,43 @@ class EdgeTransport:
         if self._cmd_future and not self._cmd_future.done():
             self._cmd_future.set_exception(RuntimeError(reason))
         self._cmd_future = None
+        if self._hpke_setup_future and not self._hpke_setup_future.done():
+            self._hpke_setup_future.set_exception(RuntimeError(reason))
+        self._hpke_setup_future = None
         if self._sub_waiter and not self._sub_waiter.done():
             self._sub_waiter.set_exception(RuntimeError(reason))
         self._sub_waiter = None
+
+    def _dispatch_binary(self, data: bytes) -> None:
+        try:
+            kind, payload = decode_binary_frame(data)
+        except Exception as exc:
+            logger.warning("binary frame decode failed: %s", exc)
+            return
+        if kind is DecodedBinary.HPKE_SETUP_REPLY:
+            reply = payload
+            msg = {
+                "type": "hpke_setup_reply",
+                "conn_id": reply.conn_id,
+                "established": reply.established,
+            }
+            if self._hpke_setup_future and not self._hpke_setup_future.done():
+                self._hpke_setup_future.set_result(msg)
+            return
+        if kind is DecodedBinary.ENCRYPTED_PUSH:
+            msg = encrypted_push_to_json(payload)
+            if msg and self.on_encrypted_push:
+                self.on_encrypted_push(msg)
+            return
 
     async def _recv_loop(self) -> None:
         """Background task: read messages from WebSocket and dispatch."""
         try:
             async for raw in self._ws:
                 self._last_inbound = time.monotonic()
+                if isinstance(raw, bytes):
+                    self._dispatch_binary(raw)
+                    continue
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
@@ -641,6 +704,10 @@ class EdgeTransport:
         if msg_type == "encrypted_push":
             if self.on_encrypted_push:
                 self.on_encrypted_push(msg)
+            return
+
+        if msg_type == "hpke_setup_reply":
+            self.resolve_command(msg)
             return
 
         if msg_type == "noise_handshake_reply":
