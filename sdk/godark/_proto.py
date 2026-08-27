@@ -581,6 +581,8 @@ def parse_order_update_proto(data: bytes) -> OrderUpdate:
         cancel_reason=cancel_reason,
         reject_reason=reject_reason,
         msg=msg.msg if msg.HasField("msg") else None,
+        reduce_only=msg.reduce_only,
+        post_only=msg.post_only,
         correlation_id=_correlation_id_to_int(msg.correlation_id),
         timestamp=int(msg.timestamp),
         leverage=int(msg.leverage),

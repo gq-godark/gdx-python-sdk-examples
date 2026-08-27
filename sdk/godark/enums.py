@@ -57,6 +57,10 @@ class CancelReason(str, Enum):
     FOK_NOT_FILLED = "FOK_NOT_FILLED"
     EXPIRED = "EXPIRED"
     SYSTEM = "SYSTEM"
+    ADL = "ADL"
+    LIQUIDATED_CANCELED = "LIQUIDATED_CANCELED"
+    MARGIN_CANCELED = "MARGIN_CANCELED"
+    REDUCE_ONLY = "REDUCE_ONLY"
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +121,10 @@ _CANCEL_REASON_FROM_PROTO: dict[int, CancelReason] = {
     3: CancelReason.FOK_NOT_FILLED,
     4: CancelReason.EXPIRED,
     5: CancelReason.SYSTEM,
+    6: CancelReason.ADL,
+    7: CancelReason.LIQUIDATED_CANCELED,
+    8: CancelReason.MARGIN_CANCELED,
+    9: CancelReason.REDUCE_ONLY,
 }
 
 # ---------------------------------------------------------------------------

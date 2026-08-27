@@ -64,7 +64,7 @@ def _timestamp_ns() -> int:
 
 class GodarkRestClient:
     """
-    REST client for authenticated read endpoints.
+    REST client for authenticated read endpoints and public market-data GETs.
 
     Encrypted order placement, modification, cancellation, and leverage updates
     require the WebSocket client's per-connection Noise XK transport.
@@ -552,6 +552,22 @@ class GodarkRestClient:
                     )
                 )
         return LeverageSettings(settings=tuple(settings))
+
+    # ------------------------------------------------------------------
+    # Public market data (no auth)
+    # ------------------------------------------------------------------
+
+    async def get_funding_rates(self) -> list[Any]:
+        """``GET /api/v1/market-data/funding-rates`` — public snapshot (no connect required)."""
+        return await self._http.get_funding_rates()
+
+    async def get_open_interest(self) -> list[Any]:
+        """``GET /api/v1/market-data/open-interest`` — public snapshot (no connect required)."""
+        return await self._http.get_open_interest()
+
+    async def get_volume(self) -> dict[str, Any]:
+        """``GET /api/v1/market-data/volume`` — public 24h volume snapshot (no connect required)."""
+        return await self._http.get_volume()
 
     async def update_leverage(self, symbol: str, leverage: int) -> OrderAck:
         """Send encrypted leverage update via ``POST /api/v1/leverage``."""
