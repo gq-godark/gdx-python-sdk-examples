@@ -90,6 +90,8 @@ class OrderUpdate:
     cancel_reason: CancelReason | None = None
     reject_reason: str | None = None
     msg: str | None = None
+    reduce_only: bool = False
+    post_only: bool = False
     correlation_id: int = 0
     timestamp: int = 0
     #: Client-selected leverage at order-placement time (1 = 1x).
@@ -233,7 +235,36 @@ class LeverageSetting:
 
 @dataclass(frozen=True)
 class LeverageSettings:
+    """Per-user leverage prefs from REST ``GET /leverage`` or encrypted WS push.
+
+    WS pushes (positions subscribe / after ``update_leverage``) also carry
+    ``user_uuid`` and ``server_timestamp``; REST snapshots leave those at defaults.
+    """
+
     settings: tuple[LeverageSetting, ...]
+    user_uuid: str = ""
+    server_timestamp: int = 0
+
+
+@dataclass(frozen=True)
+class OpenOrderRow:
+    """One resting order row inside an :class:`OpenOrdersSnapshot`."""
+
+    order_id: str
+    symbol_id: int
+    leverage: int
+    price: str = ""
+    quantity: str = ""
+    remaining_qty: str = ""
+
+
+@dataclass(frozen=True)
+class OpenOrdersSnapshot:
+    """Encrypted ``NodeResponse::OpenOrdersSnapshot`` push (subscribe / UpdateLeverage refresh)."""
+
+    rows: tuple[OpenOrderRow, ...]
+    server_timestamp: int = 0
+    correlation_id: int = 0
 
 
 @dataclass(frozen=True)

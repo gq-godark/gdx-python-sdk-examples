@@ -217,9 +217,16 @@ async def main() -> int:
         n = len(order_events)
         while order_events:
             u = order_events.popleft()
+            badges = ""
+            if u.cancel_reason is not None:
+                badges += f"  cancel_reason={u.cancel_reason}"
+            if u.reduce_only:
+                badges += "  reduce_only=true"
+            if u.post_only:
+                badges += "  post_only=true"
             print(
                 f"ORDER  {u.update_type}  id={u.order_id}  status={u.status}  "
-                f"filled={u.filled_qty}  remaining={u.remaining_qty}",
+                f"filled={u.filled_qty}  remaining={u.remaining_qty}{badges}",
                 flush=True,
             )
         if n:
