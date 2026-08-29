@@ -30,6 +30,8 @@ from .enums import (  # noqa: E402
 from .types import (  # noqa: E402
     BalanceUpdate,
     FundingRateUpdate,
+    OpenOrderRow,
+    OpenOrdersSnapshot,
     OrderUpdate,
     PositionRow,
     PositionsSnapshot,
@@ -150,6 +152,36 @@ def build_cancel_order_proto(
         user_uuid=user_uuid,
     )
     req = sequencer_pb2.EdgeSequencerRequest(cancel=cancel)
+    return req.SerializeToString()
+
+
+def build_amend_tpsl_proto(
+    user_uuid: bytes,
+    order_id: int,
+    correlation_id_bytes: bytes,
+    *,
+    take_profit_price: float | None = None,
+    stop_loss_price: float | None = None,
+    symbol_id: int | None = None,
+    position_side: str | None = None,
+) -> bytes:
+    """Build an AmendTpslRequest wrapped in EdgeSequencerRequest."""
+    amend = sequencer_pb2.AmendTpslRequest(
+        user_uuid=user_uuid,
+        order_id=order_id,
+        correlation_id=correlation_id_body_bytes(correlation_id_bytes),
+    )
+    if take_profit_price is not None:
+        amend.take_profit_price = take_profit_price
+    if stop_loss_price is not None:
+        amend.stop_loss_price = stop_loss_price
+    if symbol_id is not None:
+        amend.symbol_id = symbol_id
+    if position_side is not None:
+        amend.position_side = _SIDE_TO_PROTO[
+            position_side if isinstance(position_side, str) else position_side.value
+        ]
+    req = sequencer_pb2.EdgeSequencerRequest(amend_tpsl=amend)
     return req.SerializeToString()
 
 
@@ -431,6 +463,22 @@ def parse_node_response(data: bytes) -> dict[str, Any]:
             "timestamp": fill.timestamp,
             "correlation_id": fill.correlation_id,
         }
+    elif which == "tpsl_ack":
+        t = resp.tpsl_ack
+        result: dict[str, Any] = {
+            "type": "tpsl_ack",
+            "correlation_id": t.correlation_id,
+            "parent_order_id": t.parent_order_id,
+        }
+        if t.HasField("take_profit"):
+            result["take_profit"] = t.take_profit
+        if t.HasField("stop_loss"):
+            result["stop_loss"] = t.stop_loss
+        if t.HasField("error_code"):
+            result["error_code"] = t.error_code
+        if t.HasField("reject_text"):
+            result["reject_text"] = t.reject_text
+        return result
     elif which == "signing":
         return {"type": "signing"}
     else:
@@ -661,16 +709,77 @@ def parse_balance_update_proto(msg: sequencer_pb2.BalanceUpdateMessage) -> Balan
     )
 
 
+def parse_open_orders_snapshot(data: bytes) -> OpenOrdersSnapshot:
+    """Decode a ``NodeResponse`` carrying ``OpenOrdersSnapshot`` (not ``SequencerToEdgeMessage``)."""
+    resp = sequencer_pb2.NodeResponse()
+    resp.ParseFromString(data)
+    which = resp.WhichOneof("inner")
+    if which != "open_orders_snapshot":
+        raise ValueError(f"NodeResponse is not open_orders_snapshot (got {which!r})")
+    snap = resp.open_orders_snapshot
+    rows: list[OpenOrderRow] = []
+    for row in snap.rows:
+        rows.append(
+            OpenOrderRow(
+                order_id=str(row.order_id),
+                symbol_id=int(row.symbol_id),
+                leverage=int(row.leverage),
+                price=row.price,
+                quantity=row.quantity,
+                remaining_qty=row.remaining_qty,
+            )
+        )
+    corr = 0
+    if snap.correlation_id:
+        corr = _correlation_id_to_int(snap.correlation_id)
+    return OpenOrdersSnapshot(
+        rows=tuple(rows),
+        server_timestamp=int(snap.server_timestamp),
+        correlation_id=corr,
+    )
+
+
 def parse_funding_rate_update_proto(
     msg: sequencer_pb2.FundingRateUpdateMessage,
 ) -> FundingRateUpdate:
     return FundingRateUpdate(
         symbol_id=int(msg.symbol_id),
-        current_rate=msg.current_rate,
-        predicted_rate=msg.predicted_rate,
-        next_funding_time=int(msg.next_funding_time),
+        funding_rate=msg.funding_rate,
         timestamp=int(msg.timestamp),
+        last_funding_rate=msg.last_funding_rate,
     )
+
+
+def parse_funding_rate_snapshot_json(msg: dict[str, Any]) -> list[FundingRateUpdate]:
+    """Decode edge JSON ``funding_rate_snapshot`` (public WS channel) into updates."""
+    if msg.get("type") != "funding_rate_snapshot":
+        return []
+    rows = msg.get("rows")
+    if not isinstance(rows, list):
+        return []
+    out: list[FundingRateUpdate] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            symbol_id = int(row.get("symbol_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        funding_rate = str(row.get("funding_rate") or "")
+        last_funding_rate = str(row.get("last_funding_rate") or "")
+        try:
+            timestamp = int(row.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            timestamp = 0
+        out.append(
+            FundingRateUpdate(
+                symbol_id=symbol_id,
+                funding_rate=funding_rate,
+                timestamp=timestamp,
+                last_funding_rate=last_funding_rate,
+            )
+        )
+    return out
 
 
 SequencerPush: TypeAlias = (

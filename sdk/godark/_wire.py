@@ -70,6 +70,10 @@ _MESSAGE_TYPE_NAMES = {
     10: "batch_modify_ack",
     11: "tpsl_update",
     12: "leverage_settings",
+    13: "cancel_all_ack",
+    14: "close_all_ack",
+    15: "reverse_ack",
+    16: "tpsl_ack",
 }
 
 

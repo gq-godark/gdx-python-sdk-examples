@@ -18,7 +18,6 @@ from godark import (
     Environment,
     FundingRateUpdate,
     GodarkClient,
-    GodarkRestClient,
     MarginAlert,
     OrderType,
     OrderUpdate,
@@ -187,7 +186,7 @@ async def main() -> int:
     print(f"Authenticated as user_uuid={uid}  (session encrypted)")
 
     try:
-        await client.subscribe(["orders", "positions"])
+        await client.subscribe(["orders", "positions", "funding_rate"])
     except Exception as e:
         print(f"Subscribe failed: {e}", file=sys.stderr)
         await client.disconnect()
@@ -196,20 +195,13 @@ async def main() -> int:
     print("Subscribed to order + position updates")
     await asyncio.sleep(0.35)
 
-    # Leverage updates use encrypted REST on the HPKE SDK (not the WS client).
-    print("Setting leverage to 1 via GodarkRestClient.update_leverage...")
-    rest_kwargs = {k: v for k, v in client_kwargs.items() if k in ("api_key", "api_key_id", "api_secret", "passphrase", "user_uuid")}
-    if edge:
-        rest_kwargs["rest_base_url"] = edge.replace("wss://", "https://").replace(
-            "ws://", "http://"
-        ).removesuffix("/ws/v1")
+    # Leverage updates use encrypted WebSocket (same session as place/cancel).
+    print("Setting leverage to 1 via GodarkClient.update_leverage...")
     try:
-        async with GodarkRestClient(**rest_kwargs) as rest:
-            await rest.connect()
-            lev_ack = await rest.update_leverage(SYMBOL, 1)
-            print(
-                f"update_leverage: success={lev_ack.success} order_id={lev_ack.order_id}"
-            )
+        lev_ack = await client.update_leverage(SYMBOL, 1)
+        print(
+            f"update_leverage: success={lev_ack.success} order_id={lev_ack.order_id}"
+        )
     except Exception as e:
         print_order_error("update_leverage rejected", e)
 
