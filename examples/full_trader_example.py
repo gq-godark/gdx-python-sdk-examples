@@ -155,7 +155,7 @@ async def main() -> int:
         bump("funding_rate")
         print(
             f"FUND   symbol={fu.symbol_id}  "
-            f"current={fu.current_rate}  predicted={fu.predicted_rate}",
+            f"rate={fu.funding_rate}  last={fu.last_funding_rate}",
             flush=True,
         )
 
