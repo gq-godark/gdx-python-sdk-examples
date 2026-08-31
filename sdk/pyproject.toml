@@ -5,20 +5,10 @@ build-backend = "hatchling.build"
 [project]
 name = "godark"
 version = "0.2.0"
-description = "Python SDK for the GoDark DEX -- encrypted trading over WebSocket"
+description = "Python SDK for the GoDark DEX — encrypted trading over WebSocket"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-classifiers = [
-    "Development Status :: 4 - Beta",
-    "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Typing :: Typed",
-]
 dependencies = [
     "websockets>=13.0",
     "cryptography>=42.0",
@@ -30,45 +20,8 @@ dependencies = [
 [project.urls]
 Homepage = "https://godark.exchange"
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.24",
-    "ruff>=0.8.0",
-    "pip-audit>=2.7.0",
-    "grpcio-tools>=1.60",
-]
-
 [tool.hatch.build.targets.wheel]
-packages = ["src/godark"]
+packages = ["godark"]
 
-# Canonical map lives at shared/symbols.json in repo root (shared across GoDark SDKs).
 [tool.hatch.build.targets.wheel.force-include]
 "shared/symbols.json" = "godark/symbols.json"
-
-[tool.hatch.envs.default]
-features = ["dev"]
-
-[tool.hatch.envs.default.scripts]
-proto-gen = "bash scripts/proto_gen.sh"
-
-[tool.pytest.ini_options]
-asyncio_mode = "strict"
-pythonpath = ["src"]
-testpaths = ["tests"]
-markers = [
-  "live: requires a running gdx-edge localnet (set EDGE_URL/API_KEY/USER_UUID)",
-]
-
-[tool.ruff]
-line-length = 100
-target-version = "py310"
-extend-exclude = ["src/godark/_generated"]
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "SIM"]
-ignore = ["E501"]
-
-[tool.ruff.lint.isort]
-known-first-party = ["godark"]
-
