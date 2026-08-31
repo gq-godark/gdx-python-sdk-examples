@@ -737,6 +737,21 @@ def parse_open_orders_snapshot_proto(msg: sequencer_pb2.OpenOrdersSnapshot) -> O
     )
 
 
+def parse_open_orders_snapshot(data: bytes) -> OpenOrdersSnapshot:
+    """Decode ``open_orders_snapshot`` wire (legacy NodeResponse or direct message).
+
+    Used by the WS client: field 3 on ``NodeResponse`` collides with
+    ``SequencerToEdgeMessage.funding_rate_update``, so this path must not go
+    through :func:`parse_sequencer_to_edge_message`.
+    """
+    variant, payload = _resolve_rest_payload(data, "open_orders_snapshot")
+    if variant != "open_orders_snapshot":
+        raise ValueError(f"payload is not an open_orders_snapshot (got {variant!r})")
+    msg = sequencer_pb2.OpenOrdersSnapshot()
+    msg.ParseFromString(payload)
+    return parse_open_orders_snapshot_proto(msg)
+
+
 def parse_account_margin_update_proto(
     msg: sequencer_pb2.AccountMarginUpdate,
 ) -> AccountMarginUpdate:
@@ -825,10 +840,9 @@ def parse_funding_rate_update_proto(
 ) -> FundingRateUpdate:
     return FundingRateUpdate(
         symbol_id=int(msg.symbol_id),
-        current_rate=msg.funding_rate,
-        predicted_rate=msg.last_funding_rate,
-        next_funding_time=0,
+        funding_rate=msg.funding_rate,
         timestamp=int(msg.timestamp),
+        last_funding_rate=msg.last_funding_rate,
     )
 
 

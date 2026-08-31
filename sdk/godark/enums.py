@@ -194,6 +194,7 @@ _RESPONSE_MESSAGE_TYPE_TO_PROTO: dict[str, int] = {
     "cancel_all_ack": 13,
     "close_all_ack": 14,
     "reverse_ack": 15,
+    "tpsl_ack": 16,
 }
 
 
