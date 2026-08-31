@@ -265,25 +265,6 @@ class LeverageSettings:
 
 
 @dataclass(frozen=True)
-class AccountMarginSummary:
-    """Authoritative account-level margin summary (decimal string amounts)."""
-
-    total_collateral: str
-    position_margin: str
-    reserved_order_margin: str
-    free_collateral: str
-
-
-@dataclass(frozen=True)
-class AccountMarginUpdate:
-    """Encrypted ``NodeResponse::AccountMarginUpdate`` (REST snapshot or WS push)."""
-
-    user_uuid: str
-    server_timestamp: int
-    account: AccountMarginSummary | None = None
-
-
-@dataclass(frozen=True)
 class OpenOrderRow:
     """One resting order row inside an :class:`OpenOrdersSnapshot`."""
 
