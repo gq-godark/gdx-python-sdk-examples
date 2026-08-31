@@ -881,6 +881,7 @@ def parse_funding_rate_snapshot_json(msg: dict) -> list[FundingRateUpdate]:
         )
     return out
 
+
 def parse_sequencer_to_edge_message(data: bytes) -> SequencerPush:
     """Decode a SequencerToEdgeMessage and dispatch to the appropriate parsed type."""
     msg = sequencer_pb2.SequencerToEdgeMessage()

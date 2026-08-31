@@ -142,7 +142,7 @@ def _infer_environment_from_edge_url(edge_base: str) -> Environment:
     host = (edge_base or "").strip().lower()
     for prefix in ("https://", "http://", "wss://", "ws://"):
         if host.startswith(prefix):
-            host = host[len(prefix):]
+            host = host[len(prefix) :]
             break
     host = host.split("/", 1)[0]
     host = host.split(":", 1)[0]
