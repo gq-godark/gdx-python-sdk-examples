@@ -774,7 +774,7 @@ def parse_account_margin_update_proto(
 def parse_node_response_snapshot(data: bytes, message_type: str | None = None) -> tuple[str, Any]:
     """Decode REST snapshot plaintext into ``(variant, parsed)``."""
     expected = message_type.replace("-", "_") if message_type else None
-    if expected == "account_margin":
+    if expected in ("account_margin", "account_update"):
         expected = "account_margin_update"
     variant, payload = _resolve_rest_payload(data, expected)
     if variant == "open_orders_snapshot":
@@ -785,7 +785,7 @@ def parse_node_response_snapshot(data: bytes, message_type: str | None = None) -
         msg = sequencer_pb2.PositionsSnapshot()
         msg.ParseFromString(payload)
         return "positions_snapshot", parse_positions_snapshot_proto(msg)
-    if variant == "account_margin_update":
+    if variant in ("account_margin_update", "account_update"):
         msg = sequencer_pb2.AccountMarginUpdate()
         msg.ParseFromString(payload)
         return "account_margin_update", parse_account_margin_update_proto(msg)

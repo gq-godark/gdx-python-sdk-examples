@@ -507,7 +507,7 @@ class GodarkRestClient:
             _proto.build_get_account_proto,
             "/api/v1/account",
         )
-        if variant != "account_margin_update":
+        if variant not in ("account_margin_update", "account_update"):
             raise OrderError(f"expected account_margin_update, got {variant}")
         return parsed
 
