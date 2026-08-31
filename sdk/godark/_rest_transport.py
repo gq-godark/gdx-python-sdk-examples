@@ -99,6 +99,17 @@ class RestTransport:
         r.raise_for_status()
         return _unwrap(r.json())
 
+    async def post_encrypted(
+        self, *, path: str, bearer: str, body: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        r = await self._client.post(
+            path,
+            json=dict(body),
+            headers={"Authorization": f"Bearer {bearer}"},
+        )
+        r.raise_for_status()
+        return _unwrap(r.json())
+
     async def post_encrypted_order(self, *, bearer: str, body: Mapping[str, Any]) -> dict[str, Any]:
         r = await self._client.post(
             "/api/v1/orders",
@@ -192,33 +203,9 @@ class RestTransport:
         r.raise_for_status()
         return _unwrap(r.json())
 
-    async def get_auth_me(self, *, bearer: str) -> dict[str, Any]:
-        r = await self._client.get(
-            "/api/v1/auth/me",
-            headers={"Authorization": f"Bearer {bearer}"},
-        )
-        r.raise_for_status()
-        return r.json()
-
-    async def get_shielded_pool_balances(self, *, bearer: str, owner: str) -> dict[str, Any]:
-        r = await self._client.get(
-            f"/api/v1/shielded-pool/balances/{owner}",
-            headers={"Authorization": f"Bearer {bearer}"},
-        )
-        r.raise_for_status()
-        return r.json()
-
     async def revoke_token(self, *, bearer: str) -> dict[str, Any]:
         r = await self._client.post(
             "/api/v1/auth/token/revoke",
-            headers={"Authorization": f"Bearer {bearer}"},
-        )
-        r.raise_for_status()
-        return _unwrap(r.json())
-
-    async def get_leverage(self, *, bearer: str) -> dict[str, Any]:
-        r = await self._client.get(
-            "/api/v1/leverage",
             headers={"Authorization": f"Bearer {bearer}"},
         )
         r.raise_for_status()

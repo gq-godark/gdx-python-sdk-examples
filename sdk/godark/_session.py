@@ -63,6 +63,16 @@ class CryptoSession:
         self._pending_sealed = None
         self._pending_conn_id = 0
 
+    @staticmethod
+    def setup_rest(recipient_public: bytes, user_uuid: uuid.UUID, request_id: int):
+        """One-shot REST HPKE (order header uses conn_id=0)."""
+        from ._hpke import SealedSession, info_for_rest_request, setup_session
+
+        encapped, sealed = setup_session(
+            recipient_public, info_for_rest_request(user_uuid.bytes, request_id)
+        )
+        return encapped, sealed
+
     def encrypt_order(self, aad: bytes, plaintext: bytes) -> tuple[int, bytes]:
         """Encrypt an order payload. Returns (nonce_counter, ciphertext)."""
         sealed = self._require_sealed()
