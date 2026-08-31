@@ -10,8 +10,8 @@ import time
 import uuid
 from typing import Any, Literal
 
-from ._access_token import user_uuid_from_access_token_jwt
 from . import _proto
+from ._access_token import user_uuid_from_access_token_jwt
 from ._hpke import SealedSession, nonce_from_u64, pinned_sequencer_static_pub
 from ._rest_transport import RestEnvelopeError, RestTransport
 from ._session import CryptoSession
@@ -264,9 +264,7 @@ class GodarkRestClient:
         elif route == "post_path":
             if not post_path:
                 raise ValueError("post_path route requires post_path")
-            raw = await self._http.post_encrypted(
-                path=post_path, bearer=self._bearer, body=body
-            )
+            raw = await self._http.post_encrypted(path=post_path, bearer=self._bearer, body=body)
         elif route == "delete":
             if not order_id:
                 raise ValueError("delete route requires order_id")
@@ -398,7 +396,7 @@ class GodarkRestClient:
             plaintext = sealed.open_s2c(nonce_from_u64(nonce), aad, ct)
         except Exception as e:
             raise EncryptionError(f"Failed to decrypt REST reply: {e}") from e
-        return _proto.parse_node_response_snapshot(plaintext)
+        return _proto.parse_node_response_snapshot(plaintext, message_type=message_type)
 
     async def _snapshot_rpc(
         self,
@@ -789,7 +787,9 @@ class GodarkRestClient:
             results=results,
         )
 
-    def _parse_batch_cancel_rest(self, raw: dict[str, Any], sealed: SealedSession) -> BatchCancelAck:
+    def _parse_batch_cancel_rest(
+        self, raw: dict[str, Any], sealed: SealedSession
+    ) -> BatchCancelAck:
         plaintext = self._decrypt_rest_plaintext(raw, sealed)
         parsed = _proto.parse_batch_cancel_ack(plaintext)
         if parsed.get("type") != "batch_cancel_ack":
@@ -815,7 +815,9 @@ class GodarkRestClient:
             results=results,
         )
 
-    def _parse_batch_modify_rest(self, raw: dict[str, Any], sealed: SealedSession) -> BatchModifyAck:
+    def _parse_batch_modify_rest(
+        self, raw: dict[str, Any], sealed: SealedSession
+    ) -> BatchModifyAck:
         plaintext = self._decrypt_rest_plaintext(raw, sealed)
         parsed = _proto.parse_batch_modify_ack(plaintext)
         if parsed.get("type") != "batch_modify_ack":

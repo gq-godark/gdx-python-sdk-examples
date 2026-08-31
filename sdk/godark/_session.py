@@ -66,7 +66,7 @@ class CryptoSession:
     @staticmethod
     def setup_rest(recipient_public: bytes, user_uuid: uuid.UUID, request_id: int):
         """One-shot REST HPKE (order header uses conn_id=0)."""
-        from ._hpke import SealedSession, info_for_rest_request, setup_session
+        from ._hpke import info_for_rest_request, setup_session
 
         encapped, sealed = setup_session(
             recipient_public, info_for_rest_request(user_uuid.bytes, request_id)

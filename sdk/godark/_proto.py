@@ -79,6 +79,91 @@ def response_correlation_id_bytes(value: Any) -> bytes:
         return b""
 
 
+# Legacy NodeResponse oneof field numbers (pre hotpath-edge-frames REST replies).
+_LEGACY_NODE_RESPONSE_FIELD_NUM: dict[str, int] = {
+    "ack": 1,
+    "fill": 2,
+    "open_orders_snapshot": 3,
+    "node_ready": 4,
+    "mass_quote_ack": 5,
+    "batch_cancel_ack": 6,
+    "batch_modify_ack": 7,
+    "positions_snapshot": 8,
+    "account_margin_update": 9,
+    "cancel_all_ack": 10,
+    "close_all_ack": 11,
+    "reverse_ack": 12,
+}
+_LEGACY_NODE_RESPONSE_FIELD_NAME: dict[int, str] = {
+    v: k for k, v in _LEGACY_NODE_RESPONSE_FIELD_NUM.items()
+}
+
+
+def _read_varint(data: bytes, i: int) -> tuple[int, int]:
+    shift = 0
+    result = 0
+    while i < len(data):
+        b = data[i]
+        i += 1
+        result |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return result, i
+        shift += 7
+        if shift >= 64:
+            raise ValueError("varint overflow")
+    raise ValueError("truncated varint")
+
+
+def _write_varint(value: int) -> bytes:
+    out = bytearray()
+    while True:
+        b = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            break
+    return bytes(out)
+
+
+def wrap_legacy_node_response(variant: str, inner: bytes) -> bytes:
+    """Wrap ``inner`` as a legacy ``NodeResponse`` oneof (test / mock helper)."""
+    field_num = _LEGACY_NODE_RESPONSE_FIELD_NUM[variant]
+    tag = (field_num << 3) | 2
+    return bytes([tag]) + _write_varint(len(inner)) + inner
+
+
+def _unwrap_legacy_node_response(data: bytes) -> tuple[str, bytes] | None:
+    """If ``data`` is a legacy ``NodeResponse`` wrapper, return ``(variant, inner)``."""
+    if not data:
+        return None
+    tag = data[0]
+    wire_type = tag & 0x07
+    field_num = tag >> 3
+    variant = _LEGACY_NODE_RESPONSE_FIELD_NAME.get(field_num)
+    if variant is None or wire_type != 2:
+        return None
+    try:
+        length, i = _read_varint(data, 1)
+    except ValueError:
+        return None
+    end = i + length
+    if end != len(data):
+        return None
+    return variant, data[i:end]
+
+
+def _resolve_rest_payload(data: bytes, expected: str | None = None) -> tuple[str, bytes]:
+    """Return ``(variant, payload_bytes)`` for REST HPKE plaintext."""
+    unwrapped = _unwrap_legacy_node_response(data)
+    if unwrapped is not None:
+        return unwrapped
+    if expected:
+        return expected, data
+    return "ack", data
+
+
 def _uuid_bytes_to_str(raw: bytes) -> str:
     """Convert 16 raw UUID bytes to a standard hyphenated UUID string."""
     if len(raw) == _identity.USER_UUID_LEN:
@@ -414,47 +499,50 @@ def build_response_header_aad(
 # ---------------------------------------------------------------------------
 
 
-def parse_node_response(data: bytes) -> dict[str, Any]:
-    """Decode a NodeResponse protobuf and return a dict with ack/fill/signing fields."""
-    resp = sequencer_pb2.NodeResponse()
-    resp.ParseFromString(data)
-
-    which = resp.WhichOneof("inner")
-    if which == "ack":
-        ack = resp.ack
-        outcome = ack.ack_outcome
-        if outcome and outcome.kind:
-            success = outcome.kind == sequencer_pb2.ACK_OUTCOME_KIND_APPLIED
-            error_code = None
-            if outcome.HasField("business_error_code"):
-                error_code = outcome.business_error_code
-            elif outcome.HasField("system_error_code"):
-                error_code = outcome.system_error_code
-            if error_code is not None:
-                success = False
-            order_status = None
-            if outcome.HasField("order_status"):
-                order_status = _ORDER_STATUS_FROM_PROTO.get(outcome.order_status)
-        else:
-            success = False
-            error_code = None
-            order_status = None
-        result: dict[str, Any] = {
-            "type": "ack",
-            "sequence": ack.sequence,
-            "order_id": ack.order_id,
-            "success": success,
-            "correlation_id": ack.correlation_id,
-        }
+def _parse_ack_message(msg: sequencer_pb2.AckMessage) -> dict[str, Any]:
+    outcome = msg.ack_outcome
+    if outcome and outcome.kind:
+        success = outcome.kind == sequencer_pb2.ACK_OUTCOME_KIND_APPLIED
+        error_code = None
+        if outcome.HasField("business_error_code"):
+            error_code = outcome.business_error_code
+        elif outcome.HasField("system_error_code"):
+            error_code = outcome.system_error_code
         if error_code is not None:
-            result["error_code"] = error_code
-        if ack.HasField("reject_text"):
-            result["reject_text"] = ack.reject_text
-        if order_status is not None:
-            result["order_status"] = order_status
-        return result
-    elif which == "fill":
-        fill = resp.fill
+            success = False
+        order_status = None
+        if outcome.HasField("order_status"):
+            order_status = _ORDER_STATUS_FROM_PROTO.get(outcome.order_status)
+    else:
+        success = False
+        error_code = None
+        order_status = None
+    result: dict[str, Any] = {
+        "type": "ack",
+        "sequence": msg.sequence,
+        "order_id": msg.order_id,
+        "success": success,
+        "correlation_id": msg.correlation_id,
+    }
+    if error_code is not None:
+        result["error_code"] = error_code
+    if msg.HasField("reject_text"):
+        result["reject_text"] = msg.reject_text
+    if order_status is not None:
+        result["order_status"] = order_status
+    return result
+
+
+def parse_node_response(data: bytes) -> dict[str, Any]:
+    """Decode REST/WS ack (or fill) plaintext into a plain dict."""
+    variant, payload = _resolve_rest_payload(data, "ack")
+    if variant == "ack":
+        msg = sequencer_pb2.AckMessage()
+        msg.ParseFromString(payload)
+        return _parse_ack_message(msg)
+    if variant == "fill":
+        fill = sequencer_pb2.TradeMessage()
+        fill.ParseFromString(payload)
         return {
             "type": "fill",
             "trade_id": fill.trade_id,
@@ -464,10 +552,7 @@ def parse_node_response(data: bytes) -> dict[str, Any]:
             "timestamp": fill.timestamp,
             "correlation_id": fill.correlation_id,
         }
-    elif which == "signing":
-        return {"type": "signing"}
-    else:
-        return {"type": "unknown"}
+    return {"type": variant or "unknown"}
 
 
 _MASS_QUOTE_LEG_STATUS_FROM_PROTO: dict[int, str] = {
@@ -479,22 +564,13 @@ _MASS_QUOTE_LEG_STATUS_FROM_PROTO: dict[int, str] = {
 
 
 def parse_mass_quote_ack(data: bytes) -> dict[str, Any]:
-    """Decode a NodeResponse carrying a MassQuoteAck into a plain dict.
+    """Decode a MassQuoteAck (legacy NodeResponse wrapper or direct message)."""
+    variant, payload = _resolve_rest_payload(data, "mass_quote_ack")
+    if variant != "mass_quote_ack":
+        return {"type": variant or "unknown"}
 
-    Returns ``{"type": "mass_quote_ack", "sequence", "correlation_id",
-    "results": [{"leg_index", "cancelled_order_id", "new_order_id", "status",
-    "error_code", "fill_count"}]}``. ``cancelled_order_id`` / ``new_order_id``
-    are ``None`` when zero (no cancel target / replacement failed).
-    ``fill_count`` is the number of taker fills the leg produced in relaxed
-    (post_only=False) mode; 0 for a pure rest or a post-only leg.
-    """
-    resp = sequencer_pb2.NodeResponse()
-    resp.ParseFromString(data)
-    which = resp.WhichOneof("inner")
-    if which != "mass_quote_ack":
-        return {"type": which or "unknown"}
-
-    a = resp.mass_quote_ack
+    a = sequencer_pb2.MassQuoteAck()
+    a.ParseFromString(payload)
     results: list[dict[str, Any]] = []
     for r in a.results:
         results.append(
@@ -517,19 +593,13 @@ def parse_mass_quote_ack(data: bytes) -> dict[str, Any]:
 
 
 def parse_batch_cancel_ack(data: bytes) -> dict[str, Any]:
-    """Decode a NodeResponse carrying a BatchCancelAck into a plain dict.
+    """Decode a BatchCancelAck (legacy NodeResponse wrapper or direct message)."""
+    variant, payload = _resolve_rest_payload(data, "batch_cancel_ack")
+    if variant != "batch_cancel_ack":
+        return {"type": variant or "unknown"}
 
-    Returns ``{"type": "batch_cancel_ack", "node_id", "sequence", "correlation_id",
-    "results": [{"order_id", "cancelled", "error_code"}]}``. ``error_code`` is
-    ``None`` for a successful cancel and set (e.g. 2003 ORDER_NOT_FOUND) otherwise.
-    """
-    resp = sequencer_pb2.NodeResponse()
-    resp.ParseFromString(data)
-    which = resp.WhichOneof("inner")
-    if which != "batch_cancel_ack":
-        return {"type": which or "unknown"}
-
-    a = resp.batch_cancel_ack
+    a = sequencer_pb2.BatchCancelAck()
+    a.ParseFromString(payload)
     results: list[dict[str, Any]] = []
     for r in a.results:
         results.append(
@@ -549,19 +619,13 @@ def parse_batch_cancel_ack(data: bytes) -> dict[str, Any]:
 
 
 def parse_batch_modify_ack(data: bytes) -> dict[str, Any]:
-    """Decode a NodeResponse carrying a BatchModifyAck into a plain dict.
+    """Decode a BatchModifyAck (legacy NodeResponse wrapper or direct message)."""
+    variant, payload = _resolve_rest_payload(data, "batch_modify_ack")
+    if variant != "batch_modify_ack":
+        return {"type": variant or "unknown"}
 
-    Returns ``{"type": "batch_modify_ack", "node_id", "sequence", "correlation_id",
-    "results": [{"order_id", "modified", "error_code"}]}``. ``error_code`` is
-    ``None`` for a successful amend and set otherwise (2003 not-found, 2018 crossed).
-    """
-    resp = sequencer_pb2.NodeResponse()
-    resp.ParseFromString(data)
-    which = resp.WhichOneof("inner")
-    if which != "batch_modify_ack":
-        return {"type": which or "unknown"}
-
-    a = resp.batch_modify_ack
+    a = sequencer_pb2.BatchModifyAck()
+    a.ParseFromString(payload)
     results: list[dict[str, Any]] = []
     for r in a.results:
         results.append(
@@ -692,22 +756,29 @@ def parse_account_margin_update_proto(
     )
 
 
-def parse_node_response_snapshot(data: bytes) -> tuple[str, Any]:
-    """Decode NodeResponse and return ``(variant, parsed)`` for snapshot RPC replies."""
-    resp = sequencer_pb2.NodeResponse()
-    resp.ParseFromString(data)
-    which = resp.WhichOneof("inner")
-    if which == "open_orders_snapshot":
-        return "open_orders_snapshot", parse_open_orders_snapshot_proto(resp.open_orders_snapshot)
-    if which == "positions_snapshot":
-        return "positions_snapshot", parse_positions_snapshot_proto(resp.positions_snapshot)
-    if which == "account_margin_update":
-        return "account_margin_update", parse_account_margin_update_proto(
-            resp.account_margin_update
-        )
-    if which == "ack":
+def parse_node_response_snapshot(
+    data: bytes, message_type: str | None = None
+) -> tuple[str, Any]:
+    """Decode REST snapshot plaintext into ``(variant, parsed)``."""
+    expected = message_type.replace("-", "_") if message_type else None
+    if expected == "account_margin":
+        expected = "account_margin_update"
+    variant, payload = _resolve_rest_payload(data, expected)
+    if variant == "open_orders_snapshot":
+        msg = sequencer_pb2.OpenOrdersSnapshot()
+        msg.ParseFromString(payload)
+        return "open_orders_snapshot", parse_open_orders_snapshot_proto(msg)
+    if variant == "positions_snapshot":
+        msg = sequencer_pb2.PositionsSnapshot()
+        msg.ParseFromString(payload)
+        return "positions_snapshot", parse_positions_snapshot_proto(msg)
+    if variant == "account_margin_update":
+        msg = sequencer_pb2.AccountMarginUpdate()
+        msg.ParseFromString(payload)
+        return "account_margin_update", parse_account_margin_update_proto(msg)
+    if variant == "ack":
         return "ack", parse_node_response(data)
-    return which or "unknown", {"type": which or "unknown"}
+    return variant or "unknown", {"type": variant or "unknown"}
 
 
 def parse_positions_snapshot_proto(msg: sequencer_pb2.PositionsSnapshot) -> PositionsSnapshot:
@@ -756,9 +827,9 @@ def parse_funding_rate_update_proto(
 ) -> FundingRateUpdate:
     return FundingRateUpdate(
         symbol_id=int(msg.symbol_id),
-        current_rate=msg.current_rate,
-        predicted_rate=msg.predicted_rate,
-        next_funding_time=int(msg.next_funding_time),
+        current_rate=msg.funding_rate,
+        predicted_rate=msg.last_funding_rate,
+        next_funding_time=0,
         timestamp=int(msg.timestamp),
     )
 
