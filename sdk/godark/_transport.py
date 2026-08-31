@@ -270,6 +270,8 @@ class EdgeTransport:
         self.on_session_established: Callable | None = None
         self.on_rekey_required: Callable | None = None
         self.on_disconnect: Callable | None = None
+        # Public market snapshots (funding_rate, volume, open_interest) on /ws/v1.
+        self.on_public_message: Callable | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -757,6 +759,11 @@ class EdgeTransport:
         # present, else to the single serialized slot).
         if msg_type in ("ack", "error"):
             self.resolve_command(msg)
+            return
+
+        if msg_type in ("funding_rate_snapshot", "volume_snapshot", "open_interest_snapshot"):
+            if self.on_public_message:
+                self.on_public_message(msg)
             return
 
     async def _heartbeat_loop(self) -> None:

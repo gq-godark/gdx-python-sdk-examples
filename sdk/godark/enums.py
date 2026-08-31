@@ -184,6 +184,8 @@ _RESPONSE_MESSAGE_TYPE_TO_PROTO: dict[str, int] = {
     "positions_snapshot": 5,
     "balance_and_position": 6,
     "account_margin_update": 7,
+    # Devnet edge alias; same wire value as account_margin_update.
+    "account_update": 7,
     "mass_quote_ack": 8,
     "batch_cancel_ack": 9,
     "batch_modify_ack": 10,
@@ -192,6 +194,7 @@ _RESPONSE_MESSAGE_TYPE_TO_PROTO: dict[str, int] = {
     "cancel_all_ack": 13,
     "close_all_ack": 14,
     "reverse_ack": 15,
+    "tpsl_ack": 16,
 }
 
 

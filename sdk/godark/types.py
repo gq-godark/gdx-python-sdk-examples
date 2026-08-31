@@ -181,12 +181,30 @@ class MarginAlert:
 
 
 @dataclass(frozen=True)
+class AccountMarginSummary:
+    """Authoritative account-level margin summary (decimal string amounts)."""
+
+    total_collateral: str
+    position_margin: str
+    reserved_order_margin: str
+    free_collateral: str
+
+
+@dataclass(frozen=True)
+class AccountMarginUpdate:
+    """Encrypted account-margin snapshot / push."""
+
+    user_uuid: str
+    server_timestamp: int
+    account: AccountMarginSummary | None = None
+
+
+@dataclass(frozen=True)
 class FundingRateUpdate:
     symbol_id: int
-    current_rate: str
-    predicted_rate: str
-    next_funding_time: int
+    funding_rate: str
     timestamp: int
+    last_funding_rate: str
 
 
 class SettlementBatchStatus(str, Enum):
