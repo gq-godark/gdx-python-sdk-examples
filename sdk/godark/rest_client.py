@@ -18,7 +18,7 @@ from . import _proto
 from ._rest_transport import RestEnvelopeError, RestTransport
 from ._session import CryptoSession
 from ._symbols import load_offline_symbol_map, load_symbol_map_from_edge
-from .client import _resolve_passphrase
+from .client import _resolve_passphrase, _resolve_user_uuid
 from .enums import OrderType, Side, TimeInForce
 from .errors import EncryptionError, OrderError, SessionError, TimeoutError
 from .types import Balance, LeverageSetting, LeverageSettings, MeProfile, OrderAck
@@ -77,6 +77,7 @@ class GodarkRestClient:
         api_key_id: str | None = None,
         api_secret: str | None = None,
         passphrase: str | None = None,
+        user_uuid: str | None = None,
         rest_base_url: str | None = None,
         symbol_map: dict[str, int] | None = None,
     ):
@@ -103,6 +104,7 @@ class GodarkRestClient:
             raise ValueError("provide api_key or both api_key_id and api_secret")
 
         self._rest_base = _resolve_rest_base_url(rest_base_url)
+        self._config_user_uuid = _resolve_user_uuid(user_uuid)
         self._user_symbol_map = symbol_map is not None
         self._symbol_map = dict(symbol_map) if symbol_map is not None else load_offline_symbol_map()
         self._session = CryptoSession()
@@ -119,6 +121,10 @@ class GodarkRestClient:
     @property
     def bearer_token(self) -> str | None:
         return self._bearer
+
+    @property
+    def user_uuid(self) -> str | None:
+        return self._user_uuid
 
     @property
     def session(self) -> CryptoSession:
@@ -151,6 +157,14 @@ class GodarkRestClient:
         if not self._bearer:
             raise SessionError("auth/token missing access_token/token")
         self._user_uuid = auth_data.get("user_uuid")
+        if not self._user_uuid:
+            from ._access_token import user_uuid_from_access_token_jwt
+
+            parsed = user_uuid_from_access_token_jwt(self._bearer)
+            if parsed is not None:
+                self._user_uuid = str(parsed)
+        if not self._user_uuid:
+            self._user_uuid = self._config_user_uuid
 
     async def disconnect(self) -> None:
         try:

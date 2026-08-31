@@ -47,6 +47,7 @@ from .types import (
     MarginAlert,
     MassQuoteAck,
     MassQuoteLegResult,
+    OpenOrdersSnapshot,
     OrderAck,
     OrderUpdate,
     PositionsSnapshot,
@@ -69,6 +70,8 @@ _INFLIGHT_ACK_TYPE = {
     "mass_quote": "mass_quote_ack",
     "batch_cancel": "batch_cancel_ack",
     "batch_modify": "batch_modify_ack",
+    "amend_tpsl": "tpsl_ack",
+    "cancel_tpsl": "tpsl_ack",
 }
 
 # Testnet WebSocket origin (GodarkClient appends `/ws/v1`).
@@ -361,6 +364,9 @@ class GodarkClient:
         self._funding_rate_queue: asyncio.Queue[FundingRateUpdate] = asyncio.Queue(
             maxsize=stream_buffer_size
         )
+        self._open_orders_snapshot_queue: asyncio.Queue[OpenOrdersSnapshot] = asyncio.Queue(
+            maxsize=stream_buffer_size
+        )
         self._settlement_queue: asyncio.Queue[SettlementUpdate] = asyncio.Queue(
             maxsize=stream_buffer_size
         )
@@ -371,6 +377,7 @@ class GodarkClient:
         self._balance_callbacks: list[Callable[[BalanceUpdate], None]] = []
         self._margin_alert_callbacks: list[Callable[[MarginAlert], None]] = []
         self._funding_rate_callbacks: list[Callable[[FundingRateUpdate], None]] = []
+        self._open_orders_snapshot_callbacks: list[Callable[[OpenOrdersSnapshot], None]] = []
         self._settlement_callbacks: list[Callable[[SettlementUpdate], None]] = []
         self._reconnect_callbacks: list[Callable[[], None]] = []
         self._error_callbacks: list[Callable[[BaseException], None]] = []
@@ -425,6 +432,7 @@ class GodarkClient:
 
         await self._transport.connect()
         self._transport.on_encrypted_push = self._handle_encrypted_push
+        self._transport.on_public_message = self._handle_public_message
         self._transport.on_rekey_required = lambda msg: asyncio.create_task(self._handle_rekey(msg))
         self._transport.on_disconnect = self._on_transport_disconnect
 
@@ -602,6 +610,30 @@ class GodarkClient:
 
         return await self._send_encrypted_order("modify", symbol_id, plaintext, corr_id)
 
+    async def update_leverage(self, symbol: str, leverage: int) -> OrderAck:
+        """Set per-symbol account leverage over encrypted WebSocket (HPKE).
+
+        Place and mass-quote inherit this setting server-side. Uses the legacy
+        ``encrypted_order`` binary frame (docs-wire has no ``update_leverage`` op).
+        """
+        self._ensure_ready()
+        symbol_id = self._resolve_symbol(symbol)
+        corr_id = _new_correlation_id()
+        plaintext = _proto.build_update_leverage_proto(
+            user_uuid=self._user_uuid_bytes(),
+            symbol_id=symbol_id,
+            leverage=leverage,
+            correlation_id_bytes=corr_id,
+        )
+        response = await self._send_encrypted_command(
+            "update_leverage",
+            "update_leverage",
+            symbol_id,
+            plaintext,
+            corr_id,
+        )
+        return self._parse_order_response(response)
+
     async def mass_quote(
         self,
         symbol: str,
@@ -710,7 +742,11 @@ class GodarkClient:
     async def subscribe(
         self, channels: tuple[str, ...] | list[str] = ("orders", "positions")
     ) -> None:
-        """Subscribe to order and/or position update channels."""
+        """Subscribe to private and/or public edge channels.
+
+        Private (HPKE encrypted): ``orders``, ``positions``, etc.
+        Public (JSON snapshot): ``funding_rate``, ``volume``, ``open_interest``.
+        """
         self._ensure_ready()
         ch_list = list(channels)
         for c in ch_list:
@@ -770,8 +806,16 @@ class GodarkClient:
         self._margin_alert_callbacks.append(callback)
 
     def on_funding_rate_update(self, callback: Callable[[FundingRateUpdate], None]) -> None:
-        """Register for per-symbol funding rate ticks."""
+        """Register for per-symbol funding rate updates.
+
+        Delivered from the public ``funding_rate`` WS channel (``funding_rate_snapshot``
+        JSON). Subscribe with ``await client.subscribe([..., "funding_rate"])``.
+        """
         self._funding_rate_callbacks.append(callback)
+
+    def on_open_orders_snapshot(self, callback: Callable[[OpenOrdersSnapshot], None]) -> None:
+        """Register for open-order book hydration batches."""
+        self._open_orders_snapshot_callbacks.append(callback)
 
     def on_settlement_update(self, callback: Callable[[SettlementUpdate], None]) -> None:
         """Register for settlement-batch lifecycle updates."""
@@ -1137,6 +1181,18 @@ class GodarkClient:
     # Internals: push message handlers
     # ------------------------------------------------------------------
 
+    def _handle_public_message(self, msg: dict) -> None:
+        for update in _proto.parse_funding_rate_snapshot_json(msg):
+            self._dispatch_funding_rate_update(update)
+
+    def _dispatch_funding_rate_update(self, update: FundingRateUpdate) -> None:
+        if not update.funding_rate:
+            return
+        self._bounded_put(self._funding_rate_queue, update)
+        for cb in self._funding_rate_callbacks:
+            with contextlib.suppress(Exception):
+                cb(update)
+
     def _handle_encrypted_push(self, msg: dict) -> None:
         """Decrypt and dispatch an encrypted push frame."""
         self._dispatch_encrypted_push_in_order(msg)
@@ -1144,7 +1200,16 @@ class GodarkClient:
     def _dispatch_encrypted_push_in_order(self, msg: dict) -> None:
         message_type = msg.get("message_type", "")
 
-        if message_type in ("ack", "mass_quote_ack", "batch_cancel_ack", "batch_modify_ack"):
+        if message_type in (
+            "ack",
+            "mass_quote_ack",
+            "batch_cancel_ack",
+            "batch_modify_ack",
+            "cancel_all_ack",
+            "close_all_ack",
+            "reverse_ack",
+            "tpsl_ack",
+        ):
             # Resolve the in-flight command for any encrypted ack whose correlation
             # id matches the waiter (matches Go/Rust). Reject acks for batch ops
             # must surface to the caller instead of timing out.
@@ -1171,6 +1236,20 @@ class GodarkClient:
             err.__cause__ = e
             logger.error("Failed to decrypt push: %s", e)
             self._emit_error(err)
+            return
+
+        if message_type == "open_orders_snapshot":
+            # NodeResponse plaintext — field 3 collides with
+            # SequencerToEdgeMessage.funding_rate_update.
+            try:
+                snap = _proto.parse_open_orders_snapshot(plaintext)
+            except Exception as e:
+                err = GodarkError(f"Failed to parse open_orders_snapshot: {e}")
+                err.__cause__ = e
+                logger.error("Failed to parse open_orders_snapshot: %s", e)
+                self._emit_error(err)
+                return
+            self._dispatch_open_orders_snapshot(snap)
             return
 
         try:
@@ -1230,10 +1309,7 @@ class GodarkClient:
             return
 
         if isinstance(parsed, FundingRateUpdate):
-            self._bounded_put(self._funding_rate_queue, parsed)
-            for cb in self._funding_rate_callbacks:
-                with contextlib.suppress(Exception):
-                    cb(parsed)
+            self._dispatch_funding_rate_update(parsed)
             return
 
         if isinstance(parsed, SettlementUpdate):
@@ -1248,6 +1324,12 @@ class GodarkClient:
                 "Ignoring sequencer push with unknown or empty inner (oneof=%r)",
                 parsed.oneof_field,
             )
+
+    def _dispatch_open_orders_snapshot(self, snap: OpenOrdersSnapshot) -> None:
+        self._bounded_put(self._open_orders_snapshot_queue, snap)
+        for cb in self._open_orders_snapshot_callbacks:
+            with contextlib.suppress(Exception):
+                cb(snap)
 
     @staticmethod
     def _is_terminal_place_update(update: OrderUpdate) -> bool:
