@@ -857,6 +857,30 @@ SequencerPush: TypeAlias = (
 )
 
 
+def parse_funding_rate_snapshot_json(msg: dict) -> list[FundingRateUpdate]:
+    """Parse a public ``funding_rate_snapshot`` JSON push into updates."""
+    if not isinstance(msg, dict) or msg.get("type") != "funding_rate_snapshot":
+        return []
+    rows = msg.get("rows")
+    if not isinstance(rows, list):
+        return []
+    out: list[FundingRateUpdate] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        funding_rate = str(row.get("funding_rate") or "")
+        if not funding_rate:
+            continue
+        out.append(
+            FundingRateUpdate(
+                symbol_id=int(row.get("symbol_id") or 0),
+                funding_rate=funding_rate,
+                timestamp=int(row.get("timestamp") or 0),
+                last_funding_rate=str(row.get("last_funding_rate") or ""),
+            )
+        )
+    return out
+
 def parse_sequencer_to_edge_message(data: bytes) -> SequencerPush:
     """Decode a SequencerToEdgeMessage and dispatch to the appropriate parsed type."""
     msg = sequencer_pb2.SequencerToEdgeMessage()

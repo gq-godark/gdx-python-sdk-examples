@@ -137,6 +137,24 @@ def _resolve_edge_base_url(explicit: str | None, default: str = _DEFAULT_EDGE_BA
     return default
 
 
+def _infer_environment_from_edge_url(edge_base: str) -> Environment:
+    """Infer Environment from edge/REST host for HPKE pin baking."""
+    host = (edge_base or "").strip().lower()
+    for prefix in ("https://", "http://", "wss://", "ws://"):
+        if host.startswith(prefix):
+            host = host[len(prefix):]
+            break
+    host = host.split("/", 1)[0]
+    host = host.split(":", 1)[0]
+    if host in ("127.0.0.1", "localhost") or host.endswith(".localhost"):
+        return Environment.LOCALNET
+    if "devnet" in host or host == "18.143.165.149":
+        return Environment.DEVNET
+    if "godark-dex.com" in host:
+        return Environment.TESTNET
+    return Environment.TESTNET
+
+
 def _resolve_noise_static_public_key_hex(
     explicit: str | None, environment: Environment
 ) -> str | None:
@@ -312,8 +330,13 @@ class GodarkClient:
         self._user_symbol_map = symbol_map is not None
         self._symbol_map = dict(symbol_map) if symbol_map is not None else load_offline_symbol_map()
         self._transport_config = transport
+        pin_env = (
+            _infer_environment_from_edge_url(base_url)
+            if base_url is not None and str(base_url).strip() != ""
+            else environment
+        )
         self._noise_static_public_key_hex = _resolve_noise_static_public_key_hex(
-            noise_static_public_key_hex, environment
+            noise_static_public_key_hex, pin_env
         )
         self._place_order_terminal_timeout = (
             place_order_terminal_timeout
