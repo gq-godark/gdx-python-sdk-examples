@@ -183,10 +183,9 @@ class MarginAlert:
 @dataclass(frozen=True)
 class FundingRateUpdate:
     symbol_id: int
-    current_rate: str
-    predicted_rate: str
-    next_funding_time: int
+    funding_rate: str
     timestamp: int
+    last_funding_rate: str
 
 
 class SettlementBatchStatus(str, Enum):
