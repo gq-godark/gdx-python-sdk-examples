@@ -23,35 +23,40 @@ _sym_db = _symbol_database.Default()
 
 
 from gdx.common.v1 import types_pb2 as gdx_dot_common_dot_v1_dot_types__pb2
+from gdx.sequencer.v1 import sequencer_pb2 as gdx_dot_sequencer_dot_v1_dot_sequencer__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x16gdx/edge/v1/edge.proto\x12\x0bgdx.edge.v1\x1a\x19gdx/common/v1/types.proto\"\xb9\x01\n\x0bOrderHeader\x12\x11\n\tuser_uuid\x18\x01 \x01(\x0c\x12\x11\n\tsymbol_id\x18\x02 \x01(\x04\x12\x30\n\x0crequest_type\x18\x03 \x01(\x0e\x32\x1a.gdx.common.v1.RequestType\x12\r\n\x05nonce\x18\x04 \x01(\x04\x12\x13\n\x0b\x62ody_length\x18\x05 \x01(\r\x12\x16\n\x0e\x63orrelation_id\x18\x06 \x01(\x0c\x12\x0f\n\x07\x63onn_id\x18\x07 \x01(\x04J\x05\x08\x64\x10\xc8\x01\"p\n\x14\x45ncryptedEdgeRequest\x12\x0f\n\x07version\x18\x01 \x01(\r\x12(\n\x06header\x18\x02 \x01(\x0b\x32\x18.gdx.edge.v1.OrderHeader\x12\x16\n\x0e\x65ncrypted_body\x18\x03 \x01(\x0cJ\x05\x08\x64\x10\xc8\x01\"\xdd\x01\n\x0eResponseHeader\x12\x11\n\tuser_uuid\x18\x01 \x01(\x0c\x12\x38\n\x0cmessage_type\x18\x02 \x01(\x0e\x32\".gdx.common.v1.ResponseMessageType\x12\x13\n\x0b\x62ody_length\x18\x03 \x01(\r\x12\r\n\x05nonce\x18\x04 \x01(\x04\x12\x15\n\rfencing_epoch\x18\x05 \x01(\x04\x12\x16\n\x0e\x63orrelation_id\x18\x06 \x01(\x0c\x12\x13\n\x0bsession_seq\x18\x07 \x01(\x04\x12\x0f\n\x07\x63onn_id\x18\x08 \x01(\x04J\x05\x08\x64\x10\xc8\x01\"t\n\x15\x45ncryptedEdgeResponse\x12\x0f\n\x07version\x18\x01 \x01(\r\x12+\n\x06header\x18\x02 \x01(\x0b\x32\x1b.gdx.edge.v1.ResponseHeader\x12\x16\n\x0e\x65ncrypted_body\x18\x03 \x01(\x0cJ\x05\x08\x64\x10\xc8\x01\"1\n\x0eSessionControl\x12\x18\n\x10last_applied_seq\x18\x01 \x01(\x04J\x05\x08\x64\x10\xc8\x01\"E\n\tHpkeSetup\x12\x11\n\tuser_uuid\x18\x01 \x01(\x0c\x12\x0f\n\x07\x63onn_id\x18\x02 \x01(\x04\x12\x14\n\x0c\x65ncapped_key\x18\x03 \x01(\x0c\"<\n\x0eHpkeSetupReply\x12\x0f\n\x07\x63onn_id\x18\x01 \x01(\x04\x12\x13\n\x0b\x65stablished\x18\x03 \x01(\x08J\x04\x08\x02\x10\x03\"2\n\x0cSessionClose\x12\x11\n\tuser_uuid\x18\x01 \x01(\x0c\x12\x0f\n\x07\x63onn_id\x18\x02 \x01(\x04\"\x9e\x01\n\x18RestEncryptedEdgeRequest\x12\x0f\n\x07version\x18\x01 \x01(\r\x12(\n\x06header\x18\x02 \x01(\x0b\x32\x18.gdx.edge.v1.OrderHeader\x12\x14\n\x0c\x65ncapped_key\x18\x03 \x01(\x0c\x12\x12\n\nrequest_id\x18\x04 \x01(\x04\x12\x16\n\x0e\x65ncrypted_body\x18\x05 \x01(\x0cJ\x05\x08\x64\x10\xc8\x01\"\x8c\x01\n\x19RestEncryptedEdgeResponse\x12\x0f\n\x07version\x18\x01 \x01(\r\x12+\n\x06header\x18\x02 \x01(\x0b\x32\x1b.gdx.edge.v1.ResponseHeader\x12\x12\n\nrequest_id\x18\x03 \x01(\x04\x12\x16\n\x0e\x65ncrypted_body\x18\x04 \x01(\x0cJ\x05\x08\x64\x10\xc8\x01\"\x9d\x03\n\x14TradingWsBinaryFrame\x12<\n\x0f\x65ncrypted_order\x18\x01 \x01(\x0b\x32!.gdx.edge.v1.EncryptedEdgeRequestH\x00\x12<\n\x0e\x65ncrypted_push\x18\x02 \x01(\x0b\x32\".gdx.edge.v1.EncryptedEdgeResponseH\x00\x12,\n\nhpke_setup\x18\x03 \x01(\x0b\x32\x16.gdx.edge.v1.HpkeSetupH\x00\x12\x37\n\x10hpke_setup_reply\x18\x04 \x01(\x0b\x32\x1b.gdx.edge.v1.HpkeSetupReplyH\x00\x12\x32\n\rsession_close\x18\x05 \x01(\x0b\x32\x19.gdx.edge.v1.SessionCloseH\x00\x12\x36\n\x0fsession_control\x18\x06 \x01(\x0b\x32\x1b.gdx.edge.v1.SessionControlH\x00\x12\x1a\n\x12subscription_epoch\x18\n \x01(\x04\x12\x12\n\nstream_seq\x18\x0b \x01(\x04\x42\x06\n\x04\x62odyb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x16gdx/edge/v1/edge.proto\x12\x0bgdx.edge.v1\x1a\x19gdx/common/v1/types.proto\x1a gdx/sequencer/v1/sequencer.proto\"\xb9\x01\n\x0bOrderHeader\x12\x11\n\tuser_uuid\x18\x01 \x01(\x0c\x12\x11\n\tsymbol_id\x18\x02 \x01(\x04\x12\x30\n\x0crequest_type\x18\x03 \x01(\x0e\x32\x1a.gdx.common.v1.RequestType\x12\r\n\x05nonce\x18\x04 \x01(\x04\x12\x13\n\x0b\x62ody_length\x18\x05 \x01(\r\x12\x16\n\x0e\x63orrelation_id\x18\x06 \x01(\x0c\x12\x0f\n\x07\x63onn_id\x18\x07 \x01(\x04J\x05\x08\x64\x10\xc8\x01\"p\n\x14\x45ncryptedEdgeRequest\x12\x0f\n\x07version\x18\x01 \x01(\r\x12(\n\x06header\x18\x02 \x01(\x0b\x32\x18.gdx.edge.v1.OrderHeader\x12\x16\n\x0e\x65ncrypted_body\x18\x03 \x01(\x0cJ\x05\x08\x64\x10\xc8\x01\"\xdd\x01\n\x0eResponseHeader\x12\x11\n\tuser_uuid\x18\x01 \x01(\x0c\x12\x38\n\x0cmessage_type\x18\x02 \x01(\x0e\x32\".gdx.common.v1.ResponseMessageType\x12\x13\n\x0b\x62ody_length\x18\x03 \x01(\r\x12\r\n\x05nonce\x18\x04 \x01(\x04\x12\x15\n\rfencing_epoch\x18\x05 \x01(\x04\x12\x16\n\x0e\x63orrelation_id\x18\x06 \x01(\x0c\x12\x13\n\x0bsession_seq\x18\x07 \x01(\x04\x12\x0f\n\x07\x63onn_id\x18\x08 \x01(\x04J\x05\x08\x64\x10\xc8\x01\"t\n\x15\x45ncryptedEdgeResponse\x12\x0f\n\x07version\x18\x01 \x01(\r\x12+\n\x06header\x18\x02 \x01(\x0b\x32\x1b.gdx.edge.v1.ResponseHeader\x12\x16\n\x0e\x65ncrypted_body\x18\x03 \x01(\x0cJ\x05\x08\x64\x10\xc8\x01\"1\n\x0eSessionControl\x12\x18\n\x10last_applied_seq\x18\x01 \x01(\x04J\x05\x08\x64\x10\xc8\x01\"E\n\tHpkeSetup\x12\x11\n\tuser_uuid\x18\x01 \x01(\x0c\x12\x0f\n\x07\x63onn_id\x18\x02 \x01(\x04\x12\x14\n\x0c\x65ncapped_key\x18\x03 \x01(\x0c\"<\n\x0eHpkeSetupReply\x12\x0f\n\x07\x63onn_id\x18\x01 \x01(\x04\x12\x13\n\x0b\x65stablished\x18\x03 \x01(\x08J\x04\x08\x02\x10\x03\"2\n\x0cSessionClose\x12\x11\n\tuser_uuid\x18\x01 \x01(\x0c\x12\x0f\n\x07\x63onn_id\x18\x02 \x01(\x04\"\x9e\x01\n\x18RestEncryptedEdgeRequest\x12\x0f\n\x07version\x18\x01 \x01(\r\x12(\n\x06header\x18\x02 \x01(\x0b\x32\x18.gdx.edge.v1.OrderHeader\x12\x14\n\x0c\x65ncapped_key\x18\x03 \x01(\x0c\x12\x12\n\nrequest_id\x18\x04 \x01(\x04\x12\x16\n\x0e\x65ncrypted_body\x18\x05 \x01(\x0cJ\x05\x08\x64\x10\xc8\x01\"\x8c\x01\n\x19RestEncryptedEdgeResponse\x12\x0f\n\x07version\x18\x01 \x01(\r\x12+\n\x06header\x18\x02 \x01(\x0b\x32\x1b.gdx.edge.v1.ResponseHeader\x12\x12\n\nrequest_id\x18\x03 \x01(\x04\x12\x16\n\x0e\x65ncrypted_body\x18\x04 \x01(\x0cJ\x05\x08\x64\x10\xc8\x01\"\x9d\x03\n\x14TradingWsBinaryFrame\x12<\n\x0f\x65ncrypted_order\x18\x01 \x01(\x0b\x32!.gdx.edge.v1.EncryptedEdgeRequestH\x00\x12<\n\x0e\x65ncrypted_push\x18\x02 \x01(\x0b\x32\".gdx.edge.v1.EncryptedEdgeResponseH\x00\x12,\n\nhpke_setup\x18\x03 \x01(\x0b\x32\x16.gdx.edge.v1.HpkeSetupH\x00\x12\x37\n\x10hpke_setup_reply\x18\x04 \x01(\x0b\x32\x1b.gdx.edge.v1.HpkeSetupReplyH\x00\x12\x32\n\rsession_close\x18\x05 \x01(\x0b\x32\x19.gdx.edge.v1.SessionCloseH\x00\x12\x36\n\x0fsession_control\x18\x06 \x01(\x0b\x32\x1b.gdx.edge.v1.SessionControlH\x00\x12\x1a\n\x12subscription_epoch\x18\n \x01(\x04\x12\x12\n\nstream_seq\x18\x0b \x01(\x04\x42\x06\n\x04\x62ody\"\xc1\x03\n\x14\x45\x64geToSequencerFrame\x12>\n\x11\x65ncrypted_request\x18\x01 \x01(\x0b\x32!.gdx.edge.v1.EncryptedEdgeRequestH\x00\x12G\n\x16rest_encrypted_request\x18\x02 \x01(\x0b\x32%.gdx.edge.v1.RestEncryptedEdgeRequestH\x00\x12=\n\x0btrade_query\x18\x03 \x01(\x0b\x32&.gdx.sequencer.v1.EdgeSequencerRequestH\x00\x12?\n\radmin_request\x18\x04 \x01(\x0b\x32&.gdx.sequencer.v1.EdgeSequencerRequestH\x00\x12,\n\nhpke_setup\x18\x05 \x01(\x0b\x32\x16.gdx.edge.v1.HpkeSetupH\x00\x12\x32\n\rsession_close\x18\x06 \x01(\x0b\x32\x19.gdx.edge.v1.SessionCloseH\x00\x12\x36\n\x0fsession_control\x18\x07 \x01(\x0b\x32\x1b.gdx.edge.v1.SessionControlH\x00\x42\x06\n\x04\x62ody\"\xd0\x07\n\x14SequencerToEdgeFrame\x12\x15\n\rfencing_epoch\x18\x14 \x01(\x04\x12\x37\n\ts2c_reply\x18\x01 \x01(\x0b\x32\".gdx.edge.v1.EncryptedEdgeResponseH\x00\x12\x34\n\x06stream\x18\x02 \x01(\x0b\x32\".gdx.edge.v1.EncryptedEdgeResponseH\x00\x12<\n\nrest_reply\x18\x03 \x01(\x0b\x32&.gdx.edge.v1.RestEncryptedEdgeResponseH\x00\x12\x37\n\x10hpke_setup_reply\x18\x04 \x01(\x0b\x32\x1b.gdx.edge.v1.HpkeSetupReplyH\x00\x12\x42\n\x0e\x63leartext_push\x18\x05 \x01(\x0b\x32(.gdx.sequencer.v1.SequencerToEdgeMessageH\x00\x12+\n\x03\x61\x63k\x18\x06 \x01(\x0b\x32\x1c.gdx.sequencer.v1.AckMessageH\x00\x12;\n\x0bopen_orders\x18\x07 \x01(\x0b\x32$.gdx.sequencer.v1.OpenOrdersSnapshotH\x00\x12\x38\n\tpositions\x18\x08 \x01(\x0b\x32#.gdx.sequencer.v1.PositionsSnapshotH\x00\x12?\n\x0e\x61\x63\x63ount_margin\x18\t \x01(\x0b\x32%.gdx.sequencer.v1.AccountMarginUpdateH\x00\x12\x38\n\x0emass_quote_ack\x18\n \x01(\x0b\x32\x1e.gdx.sequencer.v1.MassQuoteAckH\x00\x12<\n\x10\x62\x61tch_cancel_ack\x18\x0b \x01(\x0b\x32 .gdx.sequencer.v1.BatchCancelAckH\x00\x12\x38\n\x0e\x63\x61ncel_all_ack\x18\x0c \x01(\x0b\x32\x1e.gdx.sequencer.v1.CancelAllAckH\x00\x12\x36\n\rclose_all_ack\x18\r \x01(\x0b\x32\x1d.gdx.sequencer.v1.CloseAllAckH\x00\x12\x33\n\x0breverse_ack\x18\x0e \x01(\x0b\x32\x1c.gdx.sequencer.v1.ReverseAckH\x00\x12<\n\x10\x62\x61tch_modify_ack\x18\x0f \x01(\x0b\x32 .gdx.sequencer.v1.BatchModifyAckH\x00\x12-\n\x08tpsl_ack\x18\x10 \x01(\x0b\x32\x19.gdx.sequencer.v1.TpslAckH\x00\x42\x06\n\x04\x62odyb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'gdx.edge.v1.edge_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_ORDERHEADER']._serialized_start=67
-  _globals['_ORDERHEADER']._serialized_end=252
-  _globals['_ENCRYPTEDEDGEREQUEST']._serialized_start=254
-  _globals['_ENCRYPTEDEDGEREQUEST']._serialized_end=366
-  _globals['_RESPONSEHEADER']._serialized_start=369
-  _globals['_RESPONSEHEADER']._serialized_end=590
-  _globals['_ENCRYPTEDEDGERESPONSE']._serialized_start=592
-  _globals['_ENCRYPTEDEDGERESPONSE']._serialized_end=708
-  _globals['_SESSIONCONTROL']._serialized_start=710
-  _globals['_SESSIONCONTROL']._serialized_end=759
-  _globals['_HPKESETUP']._serialized_start=761
-  _globals['_HPKESETUP']._serialized_end=830
-  _globals['_HPKESETUPREPLY']._serialized_start=832
-  _globals['_HPKESETUPREPLY']._serialized_end=892
-  _globals['_SESSIONCLOSE']._serialized_start=894
-  _globals['_SESSIONCLOSE']._serialized_end=944
-  _globals['_RESTENCRYPTEDEDGEREQUEST']._serialized_start=947
-  _globals['_RESTENCRYPTEDEDGEREQUEST']._serialized_end=1105
-  _globals['_RESTENCRYPTEDEDGERESPONSE']._serialized_start=1108
-  _globals['_RESTENCRYPTEDEDGERESPONSE']._serialized_end=1248
-  _globals['_TRADINGWSBINARYFRAME']._serialized_start=1251
-  _globals['_TRADINGWSBINARYFRAME']._serialized_end=1664
+  _globals['_ORDERHEADER']._serialized_start=101
+  _globals['_ORDERHEADER']._serialized_end=286
+  _globals['_ENCRYPTEDEDGEREQUEST']._serialized_start=288
+  _globals['_ENCRYPTEDEDGEREQUEST']._serialized_end=400
+  _globals['_RESPONSEHEADER']._serialized_start=403
+  _globals['_RESPONSEHEADER']._serialized_end=624
+  _globals['_ENCRYPTEDEDGERESPONSE']._serialized_start=626
+  _globals['_ENCRYPTEDEDGERESPONSE']._serialized_end=742
+  _globals['_SESSIONCONTROL']._serialized_start=744
+  _globals['_SESSIONCONTROL']._serialized_end=793
+  _globals['_HPKESETUP']._serialized_start=795
+  _globals['_HPKESETUP']._serialized_end=864
+  _globals['_HPKESETUPREPLY']._serialized_start=866
+  _globals['_HPKESETUPREPLY']._serialized_end=926
+  _globals['_SESSIONCLOSE']._serialized_start=928
+  _globals['_SESSIONCLOSE']._serialized_end=978
+  _globals['_RESTENCRYPTEDEDGEREQUEST']._serialized_start=981
+  _globals['_RESTENCRYPTEDEDGEREQUEST']._serialized_end=1139
+  _globals['_RESTENCRYPTEDEDGERESPONSE']._serialized_start=1142
+  _globals['_RESTENCRYPTEDEDGERESPONSE']._serialized_end=1282
+  _globals['_TRADINGWSBINARYFRAME']._serialized_start=1285
+  _globals['_TRADINGWSBINARYFRAME']._serialized_end=1698
+  _globals['_EDGETOSEQUENCERFRAME']._serialized_start=1701
+  _globals['_EDGETOSEQUENCERFRAME']._serialized_end=2150
+  _globals['_SEQUENCERTOEDGEFRAME']._serialized_start=2153
+  _globals['_SEQUENCERTOEDGEFRAME']._serialized_end=3129
 # @@protoc_insertion_point(module_scope)
