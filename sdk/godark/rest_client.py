@@ -16,7 +16,7 @@ from ._hpke import SealedSession, nonce_from_u64, pinned_sequencer_static_pub
 from ._rest_transport import RestEnvelopeError, RestTransport
 from ._session import CryptoSession
 from ._symbols import load_offline_symbol_map, load_symbol_map_from_edge
-from .client import _resolve_passphrase
+from .client import Environment, _resolve_noise_static_public_key_hex, _resolve_passphrase
 from .enums import OrderType, Side, TimeInForce
 from .errors import EncryptionError, OrderError, SessionError, TimeoutError
 from .order_error_code import make_order_error_from_json
@@ -64,6 +64,24 @@ def _ws_origin_to_http_rest(ws_url: str) -> str:
     return u
 
 
+def _infer_environment_from_rest_url(rest_base: str) -> Environment:
+    """Infer Environment from REST origin host (testnet/devnet pins; localnet none)."""
+    host = rest_base.strip().lower()
+    # Strip scheme
+    for prefix in ("https://", "http://", "wss://", "ws://"):
+        if host.startswith(prefix):
+            host = host[len(prefix) :]
+            break
+    host = host.split("/")[0].split(":")[0]
+    if host in ("127.0.0.1", "localhost") or host.endswith(".localhost"):
+        return Environment.LOCALNET
+    if "devnet" in host or host == "18.143.165.149":
+        return Environment.DEVNET
+    if "godark-dex.com" in host:
+        return Environment.TESTNET
+    return Environment.TESTNET
+
+
 def _new_correlation_id() -> bytes:
     return uuid.uuid4().bytes
 
@@ -106,6 +124,7 @@ class GodarkRestClient:
         rest_base_url: str | None = None,
         user_uuid: str | None = None,
         hpke_static_public_key_hex: str | None = None,
+        environment: Environment | None = None,
         symbol_map: dict[str, int] | None = None,
     ):
         if api_key_id is not None or api_secret is not None:
@@ -137,7 +156,16 @@ class GodarkRestClient:
         self._bearer: str | None = None
         self._user_uuid = user_uuid or _env_user_uuid()
         self._token_scope: str | None = None
-        self._hpke_pin_hex = hpke_static_public_key_hex
+        env = (
+            environment
+            if environment is not None
+            else _infer_environment_from_rest_url(self._rest_base)
+        )
+        if not isinstance(env, Environment):
+            raise TypeError("environment must be an Environment")
+        self._environment = env
+        # explicit → env vars → Environment preset (testnet/devnet baked; localnet none)
+        self._hpke_pin_hex = _resolve_noise_static_public_key_hex(hpke_static_public_key_hex, env)
         self._next_request_id = 1
         self._local_coid_index: dict[str, str] = {}
 

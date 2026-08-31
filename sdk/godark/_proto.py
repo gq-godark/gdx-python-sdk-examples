@@ -756,9 +756,7 @@ def parse_account_margin_update_proto(
     )
 
 
-def parse_node_response_snapshot(
-    data: bytes, message_type: str | None = None
-) -> tuple[str, Any]:
+def parse_node_response_snapshot(data: bytes, message_type: str | None = None) -> tuple[str, Any]:
     """Decode REST snapshot plaintext into ``(variant, parsed)``."""
     expected = message_type.replace("-", "_") if message_type else None
     if expected == "account_margin":
