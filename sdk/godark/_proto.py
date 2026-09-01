@@ -25,9 +25,9 @@ from .enums import (  # noqa: E402
     _RESPONSE_MESSAGE_TYPE_TO_PROTO,
     _SIDE_FROM_PROTO,
     _SIDE_TO_PROTO,
-    Side,
     _STP_MODE_TO_PROTO,
     _TIME_IN_FORCE_TO_PROTO,
+    Side,
 )
 from .types import (  # noqa: E402
     AccountMarginSummary,

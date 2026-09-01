@@ -44,7 +44,6 @@ from .types import (
     BatchModifyAck,
     BatchModifyLegResult,
     CountAck,
-    TpslAck,
     FundingRateUpdate,
     LeverageSettings,
     MarginAlert,
@@ -58,6 +57,7 @@ from .types import (
     PositionUpdate,
     SettlementUpdate,
     SystemHealthUpdate,
+    TpslAck,
     UnknownSequencerPush,
 )
 
@@ -95,6 +95,7 @@ _TESTNET_HPKE_STATIC_PUBLIC_KEY_HEX = (
 _DEVNET_HPKE_STATIC_PUBLIC_KEY_HEX = (
     "a6807e2f6cd04b54cc19be2fd4faea2a1239f1e2896912d91222678ab54cdd45"
 )
+
 
 class Environment(Enum):
     """Named deployment target.
@@ -177,6 +178,7 @@ def _resolve_hpke_static_public_key_hex(
         if v:
             return v
     return environment.hpke_static_public_key_hex
+
 
 def _resolve_user_uuid(explicit: str | None) -> str | None:
     """Resolve user_uuid: constructor arg wins, then env vars."""

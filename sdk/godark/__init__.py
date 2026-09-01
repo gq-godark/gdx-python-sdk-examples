@@ -49,7 +49,6 @@ from .types import (
     BatchModifyAck,
     BatchModifyLegResult,
     CountAck,
-    TpslAck,
     FundingRateUpdate,
     LeverageSetting,
     LeverageSettings,
@@ -67,6 +66,7 @@ from .types import (
     SettlementBatchStatus,
     SettlementUpdate,
     SystemHealthUpdate,
+    TpslAck,
     UnknownSequencerPush,
 )
 
@@ -86,6 +86,9 @@ __all__ = [
     "OrderUpdateType",
     "PositionUpdateType",
     "CancelReason",
+    "StpMode",
+    "CountAck",
+    "TpslAck",
     "PositionsSnapshotSource",
     "SettlementBatchStatus",
     "Balance",
