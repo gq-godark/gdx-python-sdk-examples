@@ -159,23 +159,64 @@ def _unwrap_legacy_node_response(data: bytes) -> tuple[str, bytes] | None:
     return variant, data[i:end]
 
 
-_DIRECT_HOTPATH_COUNT_ACKS = frozenset({"cancel_all_ack", "close_all_ack", "reverse_ack"})
-
-
 def _resolve_rest_payload(data: bytes, expected: str | None = None) -> tuple[str, bytes]:
     """Return ``(variant, payload_bytes)`` for REST HPKE plaintext."""
-    # Hotpath count acks are usually direct protobuf; field 3 collides with legacy snapshot wrap.
-    if expected in _DIRECT_HOTPATH_COUNT_ACKS:
-        unwrapped = _unwrap_legacy_node_response(data)
-        if unwrapped is not None and unwrapped[0] == expected:
-            return unwrapped
-        return expected, data
     unwrapped = _unwrap_legacy_node_response(data)
     if unwrapped is not None:
         return unwrapped
     if expected:
         return expected, data
     return "ack", data
+
+
+def _parse_snapshot_variant(
+    variant: str, payload: bytes, *, full_data: bytes | None = None
+) -> tuple[str, Any]:
+    if variant == "open_orders_snapshot":
+        msg = sequencer_pb2.OpenOrdersSnapshot()
+        msg.ParseFromString(payload)
+        return "open_orders_snapshot", parse_open_orders_snapshot_proto(msg)
+    if variant == "positions_snapshot":
+        msg = sequencer_pb2.PositionsSnapshot()
+        msg.ParseFromString(payload)
+        return "positions_snapshot", parse_positions_snapshot_proto(msg)
+    if variant in ("account_margin_update", "account_update"):
+        msg = sequencer_pb2.AccountMarginUpdate()
+        msg.ParseFromString(payload)
+        return "account_margin_update", parse_account_margin_update_proto(msg)
+    if variant == "ack":
+        return "ack", parse_node_response(full_data if full_data is not None else payload)
+    return variant or "unknown", {"type": variant or "unknown"}
+
+
+def _decode_rest_variant(
+    variant: str, payload: bytes, *, full_data: bytes
+) -> tuple[str, Any]:
+    count_ack_configs: dict[str, tuple[type, str, str]] = {
+        "cancel_all_ack": (sequencer_pb2.CancelAllAck, "cancelled", "cancelled_order_ids"),
+        "close_all_ack": (sequencer_pb2.CloseAllAck, "closed", "close_order_ids"),
+        "reverse_ack": (sequencer_pb2.ReverseAck, "reversed", "reverse_order_ids"),
+    }
+    if variant in count_ack_configs:
+        cls, count_field, ids_field = count_ack_configs[variant]
+        msg = cls()
+        msg.ParseFromString(payload)
+        return variant, _parse_count_ack_message(
+            variant, msg, count_field=count_field, ids_field=ids_field
+        )
+    return _parse_snapshot_variant(variant, payload, full_data=full_data)
+
+
+def _parse_node_response_with_expected(
+    data: bytes, expected: str | None
+) -> tuple[str, Any]:
+    variant, payload = _resolve_rest_payload(data, expected)
+    try:
+        return _decode_rest_variant(variant, payload, full_data=data)
+    except Exception:
+        if expected and expected != variant:
+            return _decode_rest_variant(expected, data, full_data=data)
+        raise
 
 
 def _uuid_bytes_to_str(raw: bytes) -> str:
@@ -850,20 +891,15 @@ def parse_reverse_ack(data: bytes) -> dict[str, Any]:
 
 def parse_count_ack(data: bytes, expected: str) -> dict[str, Any]:
     """Decode a cancel_all_ack / close_all_ack / reverse_ack plaintext body."""
-    parsers = {
-        "cancel_all_ack": parse_cancel_all_ack,
-        "close_all_ack": parse_close_all_ack,
-        "reverse_ack": parse_reverse_ack,
-    }
-    parser = parsers.get(expected)
-    if parser is None:
-        return {"type": "unknown"}
-    parsed = parser(data)
-    if parsed.get("type") != expected:
-        reject = parse_node_response(data)
-        if reject.get("type") == "ack" and not reject.get("success", True):
-            return reject
-    return parsed
+    variant, parsed = _parse_node_response_with_expected(data, expected)
+    if variant == expected:
+        return parsed
+    if variant == "ack":
+        return parsed
+    reject = parse_node_response(data)
+    if reject.get("type") == "ack" and not reject.get("success", True):
+        return reject
+    return {"type": variant or "unknown"}
 
 
 def parse_leverage_settings_proto(msg: sequencer_pb2.LeverageSettings) -> LeverageSettings:
@@ -981,11 +1017,25 @@ def parse_open_orders_snapshot(data: bytes) -> OpenOrdersSnapshot:
     through :func:`parse_sequencer_to_edge_message`.
     """
     variant, payload = _resolve_rest_payload(data, "open_orders_snapshot")
-    if variant != "open_orders_snapshot":
-        raise ValueError(f"payload is not an open_orders_snapshot (got {variant!r})")
-    msg = sequencer_pb2.OpenOrdersSnapshot()
-    msg.ParseFromString(payload)
-    return parse_open_orders_snapshot_proto(msg)
+    expected = "open_orders_snapshot"
+    err: Exception | None = None
+    if variant == expected:
+        try:
+            msg = sequencer_pb2.OpenOrdersSnapshot()
+            msg.ParseFromString(payload)
+            return parse_open_orders_snapshot_proto(msg)
+        except Exception as exc:
+            err = exc
+    if variant != expected:
+        try:
+            msg = sequencer_pb2.OpenOrdersSnapshot()
+            msg.ParseFromString(data)
+            return parse_open_orders_snapshot_proto(msg)
+        except Exception:
+            pass
+    if err is not None:
+        raise err
+    raise ValueError(f"payload is not an open_orders_snapshot (got {variant!r})")
 
 
 def parse_account_margin_update_proto(
@@ -1012,22 +1062,7 @@ def parse_node_response_snapshot(data: bytes, message_type: str | None = None) -
     expected = message_type.replace("-", "_") if message_type else None
     if expected in ("account_margin", "account_update"):
         expected = "account_margin_update"
-    variant, payload = _resolve_rest_payload(data, expected)
-    if variant == "open_orders_snapshot":
-        msg = sequencer_pb2.OpenOrdersSnapshot()
-        msg.ParseFromString(payload)
-        return "open_orders_snapshot", parse_open_orders_snapshot_proto(msg)
-    if variant == "positions_snapshot":
-        msg = sequencer_pb2.PositionsSnapshot()
-        msg.ParseFromString(payload)
-        return "positions_snapshot", parse_positions_snapshot_proto(msg)
-    if variant in ("account_margin_update", "account_update"):
-        msg = sequencer_pb2.AccountMarginUpdate()
-        msg.ParseFromString(payload)
-        return "account_margin_update", parse_account_margin_update_proto(msg)
-    if variant == "ack":
-        return "ack", parse_node_response(data)
-    return variant or "unknown", {"type": variant or "unknown"}
+    return _parse_node_response_with_expected(data, expected)
 
 
 def parse_positions_snapshot_proto(msg: sequencer_pb2.PositionsSnapshot) -> PositionsSnapshot:
