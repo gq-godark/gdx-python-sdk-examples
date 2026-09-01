@@ -16,7 +16,7 @@ from ._hpke import SealedSession, nonce_from_u64, pinned_sequencer_static_pub
 from ._rest_transport import RestEnvelopeError, RestTransport
 from ._session import CryptoSession
 from ._symbols import load_offline_symbol_map, load_symbol_map_from_edge
-from .client import Environment, _resolve_noise_static_public_key_hex, _resolve_passphrase
+from .client import Environment, _resolve_hpke_static_public_key_hex, _resolve_passphrase
 from .enums import OrderType, Side, TimeInForce
 from .errors import EncryptionError, OrderError, SessionError, TimeoutError
 from .order_error_code import make_order_error_from_json
@@ -75,7 +75,7 @@ def _infer_environment_from_rest_url(rest_base: str) -> Environment:
     host = host.split("/")[0].split(":")[0]
     if host in ("127.0.0.1", "localhost") or host.endswith(".localhost"):
         return Environment.LOCALNET
-    if "devnet" in host or host == "18.143.165.149":
+    if "devnet" in host:
         return Environment.DEVNET
     if "godark-dex.com" in host:
         return Environment.TESTNET
@@ -165,7 +165,7 @@ class GodarkRestClient:
             raise TypeError("environment must be an Environment")
         self._environment = env
         # explicit → env vars → Environment preset (testnet/devnet baked; localnet none)
-        self._hpke_pin_hex = _resolve_noise_static_public_key_hex(hpke_static_public_key_hex, env)
+        self._hpke_pin_hex = _resolve_hpke_static_public_key_hex(hpke_static_public_key_hex, env)
         self._next_request_id = 1
         self._local_coid_index: dict[str, str] = {}
 
@@ -213,14 +213,21 @@ class GodarkRestClient:
         if not self._bearer:
             raise SessionError("auth/token missing access_token/token")
         self._token_scope = auth_data.get("scope")
-        if self._user_uuid is None:
-            legacy_uuid = auth_data.get("user_uuid")
-            if isinstance(legacy_uuid, str) and legacy_uuid.strip():
-                self._user_uuid = legacy_uuid.strip()
-            else:
-                parsed = user_uuid_from_access_token_jwt(self._bearer)
-                if parsed is not None:
-                    self._user_uuid = str(parsed)
+        resolved: str | None = None
+        legacy_uuid = auth_data.get("user_uuid")
+        if isinstance(legacy_uuid, str) and legacy_uuid.strip():
+            resolved = legacy_uuid.strip()
+        if not resolved:
+            parsed = user_uuid_from_access_token_jwt(self._bearer)
+            if parsed is not None:
+                resolved = str(parsed)
+        if not resolved and self._user_uuid:
+            resolved = self._user_uuid
+        if not resolved:
+            raise SessionError(
+                "REST auth succeeded but user identity missing; JWT sub and fallback UUID both absent"
+            )
+        self._user_uuid = resolved
 
     async def disconnect(self) -> None:
         try:
@@ -640,6 +647,7 @@ class GodarkRestClient:
         *,
         new_price: float | None = None,
         new_quantity: float | None = None,
+        new_trigger_price: float | None = None,
     ) -> OrderAck:
         symbol_id = self._resolve_symbol(symbol)
         corr_id = _new_correlation_id()
@@ -649,6 +657,7 @@ class GodarkRestClient:
             symbol_id=symbol_id,
             new_price=new_price,
             new_quantity=new_quantity,
+            new_trigger_price=new_trigger_price,
             correlation_id_bytes=corr_id,
         )
         return await self._send_encrypted(

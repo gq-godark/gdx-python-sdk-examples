@@ -77,13 +77,13 @@ def _normalize_inbound_message(msg: dict[str, Any]) -> dict[str, Any]:
             "session_id": data.get("session_id"),
         }
 
-    if op in ("noise.handshake", "noise_handshake"):
+    if op in ("hpke.setup", "hpke_setup"):
         if code != 0:
-            return {"type": "error", "message": err_text or "Noise handshake failed"}
+            return {"type": "error", "message": err_text or "HPKE setup failed"}
         if not isinstance(data, dict):
-            return {"type": "error", "message": "invalid Noise handshake response"}
+            return {"type": "error", "message": "invalid HPKE setup response"}
         return {
-            "type": "noise_handshake_reply",
+            "type": "hpke_setup_reply",
             "conn_id": data.get("conn_id"),
             "message": data.get("message", ""),
             "established": bool(data.get("established", False)),
@@ -243,7 +243,7 @@ class EdgeTransport:
         # concurrently: each registers a future under its correlation id and
         # awaits it *without* holding a global lock, so throughput is bounded by
         # the server round-trip rather than one-command-at-a-time. Commands with
-        # no correlation id (e.g. the noise handshake) fall back to the single
+        # no correlation id (e.g. HPKE setup) fall back to the single
         # ``_cmd_future`` slot and are serialized via ``_cmd_lock``.
         self._cmd_future: asyncio.Future | None = None
         # Concurrent command waiters, keyed by header correlation id and by
@@ -350,7 +350,7 @@ class EdgeTransport:
 
         Encrypted trading ops stamp a 16-byte correlation id (hex) into the
         header. Returns "" when the payload has no correlation id (e.g. the
-        noise handshake), which selects the serialized single-slot path.
+        HPKE setup), which selects the serialized single-slot path.
         """
         header: Any = None
         args = payload.get("args")
@@ -735,10 +735,6 @@ class EdgeTransport:
             return
 
         if msg_type == "hpke_setup_reply":
-            self.resolve_command(msg)
-            return
-
-        if msg_type == "noise_handshake_reply":
             self.resolve_command(msg)
             return
 

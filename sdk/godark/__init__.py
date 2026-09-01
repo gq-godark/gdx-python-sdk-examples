@@ -10,6 +10,7 @@ from .enums import (
     OrderUpdateType,
     PositionUpdateType,
     Side,
+    StpMode,
     TimeInForce,
 )
 from .errors import (
@@ -47,6 +48,8 @@ from .types import (
     BatchCancelLegResult,
     BatchModifyAck,
     BatchModifyLegResult,
+    CountAck,
+    TpslAck,
     FundingRateUpdate,
     LeverageSetting,
     LeverageSettings,
@@ -56,6 +59,7 @@ from .types import (
     MeProfile,
     OrderAck,
     OrderUpdate,
+    PlaceOrderOptions,
     PositionRow,
     PositionsSnapshot,
     PositionsSnapshotSource,
@@ -90,6 +94,7 @@ __all__ = [
     "MeProfile",
     "OrderAck",
     "OrderUpdate",
+    "PlaceOrderOptions",
     "MassQuoteAck",
     "MassQuoteLegResult",
     "BatchCancelAck",

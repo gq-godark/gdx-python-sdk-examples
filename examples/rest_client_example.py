@@ -56,6 +56,7 @@ async def main() -> int:
         try:
             lev = await client.get_leverage()
             print(f"leverage settings: {len(lev.settings)} entries")
+            print("  (WS push: on_leverage_settings in full_trader_example.py)")
             for row in lev.settings[:5]:
                 print(f"  symbol_id={row.symbol_id} leverage={row.leverage}")
         except Exception as exc:

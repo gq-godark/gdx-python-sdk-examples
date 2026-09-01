@@ -87,7 +87,7 @@ class RestTransport:
         return _unwrap(r.json())
 
     async def session_setup(self, *, bearer: str, client_ecdh_pubkey: str) -> dict[str, Any]:
-        """Deprecated: ECDH REST session setup is retired (Noise XK is WS-only).
+        """Deprecated: ECDH REST session setup is retired (HPKE is WS-only).
 
         Kept for transport unit tests / legacy probes; ``GodarkRestClient`` never calls this.
         """

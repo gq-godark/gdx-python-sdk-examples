@@ -7,7 +7,7 @@ import asyncio
 import sys
 
 from dotenv import get_first, load_dotenv, print_order_error
-from godark import Environment, GodarkClient, OrderType, Side, TimeInForce
+from godark import Environment, GodarkClient, OrderType, PlaceOrderOptions, Side, TimeInForce
 
 SYMBOL = "BTC-USDC-PERP"
 
@@ -64,12 +64,13 @@ async def main() -> int:
                     0.01,
                     price=sell_px,
                     time_in_force=TimeInForce.GTC,
+                    options=PlaceOrderOptions(post_only=True),
                 )
                 print(f"Place OK — order_id={ack.order_id} (limit SELL @ {sell_px}, mark={mark})")
                 # Allow the resting order to settle before cancel (avoids CANCEL_TOO_SOON).
                 await asyncio.sleep(0.5)
-                cancel_ack = await client.cancel_order(str(ack.order_id), SYMBOL)
-                print(f"Cancel OK — order_id={cancel_ack.order_id}")
+                cancel_ack = await client.cancel_all_orders(SYMBOL)
+                print(f"cancel_all OK — count={cancel_ack.count} ids={list(cancel_ack.order_ids)}")
             except Exception as e:
                 print_order_error("Order rejected", e)
                 return 1
