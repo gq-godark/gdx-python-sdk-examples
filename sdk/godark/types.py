@@ -75,6 +75,41 @@ class BatchModifyAck:
 
 
 @dataclass(frozen=True)
+class TpslAck:
+    """RPC reply for amend / cancel TP-SL (``NodeResponse.tpsl_ack``)."""
+
+    parent_order_id: str
+    take_profit: str | None = None
+    stop_loss: str | None = None
+    error_code: int | None = None
+    reject_text: str | None = None
+
+
+@dataclass(frozen=True)
+class CountAck:
+    """Ack for account-wide ``cancel_all`` / ``close_all`` or per-symbol ``reverse``."""
+
+    sequence: str
+    count: int
+    order_ids: tuple[str, ...] = ()
+    error_code: int | None = None
+    reject_text: str | None = None
+
+
+@dataclass(frozen=True)
+class PlaceOrderOptions:
+    """Optional place-order flags mirrored from gdx-web / ``PlaceOrderInput``."""
+
+    reduce_only: bool = False
+    post_only: bool = False
+    stp_mode: str = "UNSPECIFIED"
+    peg_offset_bps: int | None = None
+    trigger_price: float | None = None
+    take_profit_price: float | None = None
+    stop_loss_price: float | None = None
+
+
+@dataclass(frozen=True)
 class OrderUpdate:
     order_id: str
     user_uuid: str
@@ -90,6 +125,8 @@ class OrderUpdate:
     cancel_reason: CancelReason | None = None
     reject_reason: str | None = None
     msg: str | None = None
+    reduce_only: bool = False
+    post_only: bool = False
     correlation_id: int = 0
     timestamp: int = 0
     #: Client-selected leverage at order-placement time (1 = 1x).
@@ -179,12 +216,30 @@ class MarginAlert:
 
 
 @dataclass(frozen=True)
+class AccountMarginSummary:
+    """Authoritative account-level margin summary (decimal string amounts)."""
+
+    total_collateral: str
+    position_margin: str
+    reserved_order_margin: str
+    free_collateral: str
+
+
+@dataclass(frozen=True)
+class AccountMarginUpdate:
+    """Encrypted account-margin snapshot / push."""
+
+    user_uuid: str
+    server_timestamp: int
+    account: AccountMarginSummary | None = None
+
+
+@dataclass(frozen=True)
 class FundingRateUpdate:
     symbol_id: int
-    current_rate: str
-    predicted_rate: str
-    next_funding_time: int
+    funding_rate: str
     timestamp: int
+    last_funding_rate: str
 
 
 class SettlementBatchStatus(str, Enum):
@@ -233,7 +288,36 @@ class LeverageSetting:
 
 @dataclass(frozen=True)
 class LeverageSettings:
+    """Per-user leverage prefs from REST ``GET /leverage`` or encrypted WS push.
+
+    WS pushes (positions subscribe / after ``update_leverage``) also carry
+    ``user_uuid`` and ``server_timestamp``; REST snapshots leave those at defaults.
+    """
+
     settings: tuple[LeverageSetting, ...]
+    user_uuid: str = ""
+    server_timestamp: int = 0
+
+
+@dataclass(frozen=True)
+class OpenOrderRow:
+    """One resting order row inside an :class:`OpenOrdersSnapshot`."""
+
+    order_id: str
+    symbol_id: int
+    leverage: int
+    price: str = ""
+    quantity: str = ""
+    remaining_qty: str = ""
+
+
+@dataclass(frozen=True)
+class OpenOrdersSnapshot:
+    """Encrypted ``NodeResponse::OpenOrdersSnapshot`` push (subscribe / UpdateLeverage refresh)."""
+
+    rows: tuple[OpenOrderRow, ...]
+    server_timestamp: int = 0
+    correlation_id: int = 0
 
 
 @dataclass(frozen=True)

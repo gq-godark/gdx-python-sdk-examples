@@ -11,9 +11,9 @@ class Side(str, Enum):
 class OrderType(str, Enum):
     MARKET = "MARKET"
     LIMIT = "LIMIT"
-    PEG_TO_MID = "PEG_TO_MID"
-    PEG_TO_BID = "PEG_TO_BID"
-    PEG_TO_ASK = "PEG_TO_ASK"
+    PEG = "PEG"
+    STOP_MARKET = "STOP_MARKET"
+    STOP_LIMIT = "STOP_LIMIT"
 
 
 class TimeInForce(str, Enum):
@@ -21,6 +21,21 @@ class TimeInForce(str, Enum):
     IOC = "IOC"
     FOK = "FOK"
     GTD = "GTD"
+
+
+class StpMode(str, Enum):
+    UNSPECIFIED = "UNSPECIFIED"
+    CANCEL_RESTING = "CANCEL_RESTING"
+    CANCEL_AGGRESSOR = "CANCEL_AGGRESSOR"
+    CANCEL_BOTH = "CANCEL_BOTH"
+
+
+_STP_MODE_TO_PROTO: dict[str, int] = {
+    "UNSPECIFIED": 0,
+    "CANCEL_RESTING": 1,
+    "CANCEL_AGGRESSOR": 2,
+    "CANCEL_BOTH": 3,
+}
 
 
 class OrderStatus(str, Enum):
@@ -57,6 +72,12 @@ class CancelReason(str, Enum):
     FOK_NOT_FILLED = "FOK_NOT_FILLED"
     EXPIRED = "EXPIRED"
     SYSTEM = "SYSTEM"
+    ADL = "ADL"
+    LIQUIDATED_CANCELED = "LIQUIDATED_CANCELED"
+    MARGIN_CANCELED = "MARGIN_CANCELED"
+    REDUCE_ONLY = "REDUCE_ONLY"
+    STP_EXPIRE_TAKER = "STP_EXPIRE_TAKER"
+    STP_CANCEL_RESTING = "STP_CANCEL_RESTING"
 
 
 # ---------------------------------------------------------------------------
@@ -71,9 +92,9 @@ _SIDE_FROM_PROTO: dict[int, Side] = {
 _ORDER_TYPE_FROM_PROTO: dict[int, OrderType] = {
     1: OrderType.MARKET,
     2: OrderType.LIMIT,
-    3: OrderType.PEG_TO_MID,
-    4: OrderType.PEG_TO_BID,
-    5: OrderType.PEG_TO_ASK,
+    3: OrderType.PEG,
+    4: OrderType.STOP_MARKET,
+    5: OrderType.STOP_LIMIT,
 }
 
 _TIME_IN_FORCE_FROM_PROTO: dict[int, TimeInForce] = {
@@ -117,6 +138,12 @@ _CANCEL_REASON_FROM_PROTO: dict[int, CancelReason] = {
     3: CancelReason.FOK_NOT_FILLED,
     4: CancelReason.EXPIRED,
     5: CancelReason.SYSTEM,
+    6: CancelReason.ADL,
+    7: CancelReason.LIQUIDATED_CANCELED,
+    8: CancelReason.MARGIN_CANCELED,
+    9: CancelReason.REDUCE_ONLY,
+    10: CancelReason.STP_EXPIRE_TAKER,
+    11: CancelReason.STP_CANCEL_RESTING,
 }
 
 # ---------------------------------------------------------------------------
@@ -131,9 +158,9 @@ _SIDE_TO_PROTO: dict[str, int] = {
 _ORDER_TYPE_TO_PROTO: dict[str, int] = {
     "MARKET": 1,
     "LIMIT": 2,
-    "PEG_TO_MID": 3,
-    "PEG_TO_BID": 4,
-    "PEG_TO_ASK": 5,
+    "PEG": 3,
+    "STOP_MARKET": 4,
+    "STOP_LIMIT": 5,
 }
 
 _TIME_IN_FORCE_TO_PROTO: dict[str, int] = {
@@ -176,6 +203,8 @@ _RESPONSE_MESSAGE_TYPE_TO_PROTO: dict[str, int] = {
     "positions_snapshot": 5,
     "balance_and_position": 6,
     "account_margin_update": 7,
+    # Devnet edge alias; same wire value as account_margin_update.
+    "account_update": 7,
     "mass_quote_ack": 8,
     "batch_cancel_ack": 9,
     "batch_modify_ack": 10,
@@ -184,6 +213,7 @@ _RESPONSE_MESSAGE_TYPE_TO_PROTO: dict[str, int] = {
     "cancel_all_ack": 13,
     "close_all_ack": 14,
     "reverse_ack": 15,
+    "tpsl_ack": 16,
 }
 
 
