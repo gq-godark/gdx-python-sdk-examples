@@ -43,16 +43,21 @@ from .types import (
     BatchCancelLegResult,
     BatchModifyAck,
     BatchModifyLegResult,
+    CountAck,
     FundingRateUpdate,
+    LeverageSettings,
     MarginAlert,
     MassQuoteAck,
     MassQuoteLegResult,
+    OpenOrdersSnapshot,
     OrderAck,
     OrderUpdate,
+    PlaceOrderOptions,
     PositionsSnapshot,
     PositionUpdate,
     SettlementUpdate,
     SystemHealthUpdate,
+    TpslAck,
     UnknownSequencerPush,
 )
 
@@ -69,20 +74,25 @@ _INFLIGHT_ACK_TYPE = {
     "mass_quote": "mass_quote_ack",
     "batch_cancel": "batch_cancel_ack",
     "batch_modify": "batch_modify_ack",
+    "amend_tpsl": "tpsl_ack",
+    "cancel_tpsl": "tpsl_ack",
+    "cancel_all": "cancel_all_ack",
+    "close_all": "close_all_ack",
+    "reverse": "reverse_ack",
 }
 
 # Testnet WebSocket origin (GodarkClient appends `/ws/v1`).
 _DEFAULT_EDGE_BASE_URL = "wss://api.godark-dex.com"
 
 # Devnet WebSocket origin (GodarkClient appends `/ws/v1`).
-_DEVNET_EDGE_BASE_URL = "ws://18.143.165.149:13300"
+_DEVNET_EDGE_BASE_URL = "wss://api.devnet.godark-dex.com"
 
-# Sequencer Noise XK static public keys (64 hex). These are public pins, not
+# Sequencer HPKE static public keys (64 hex). These are public pins, not
 # user secrets — Testnet and Devnet use distinct sequencer keys.
-_TESTNET_NOISE_STATIC_PUBLIC_KEY_HEX = (
+_TESTNET_HPKE_STATIC_PUBLIC_KEY_HEX = (
     "a9fdd7f26c0de36d82811e9fe1df2509960cd5b25eef037355e209b9222bea7d"
 )
-_DEVNET_NOISE_STATIC_PUBLIC_KEY_HEX = (
+_DEVNET_HPKE_STATIC_PUBLIC_KEY_HEX = (
     "a6807e2f6cd04b54cc19be2fd4faea2a1239f1e2896912d91222678ab54cdd45"
 )
 
@@ -90,8 +100,8 @@ _DEVNET_NOISE_STATIC_PUBLIC_KEY_HEX = (
 class Environment(Enum):
     """Named deployment target.
 
-    Selects the default edge URL and, when known, a baked-in sequencer Noise XK
-    public key pin. Explicit ``base_url`` / ``noise_static_public_key_hex`` and
+    Selects the default edge URL and, when known, a baked-in sequencer HPKE
+    public key pin. Explicit ``base_url`` / ``hpke_static_public_key_hex`` and
     the corresponding environment variables still win over these presets.
     """
 
@@ -109,12 +119,12 @@ class Environment(Enum):
         return _DEFAULT_EDGE_BASE_URL
 
     @property
-    def noise_static_public_key_hex(self) -> str | None:
-        """Baked-in sequencer Noise XK static public key (64 hex), when known."""
+    def hpke_static_public_key_hex(self) -> str | None:
+        """Baked-in sequencer HPKE static public key (64 hex), when known."""
         if self is Environment.TESTNET:
-            return _TESTNET_NOISE_STATIC_PUBLIC_KEY_HEX
+            return _TESTNET_HPKE_STATIC_PUBLIC_KEY_HEX
         if self is Environment.DEVNET:
-            return _DEVNET_NOISE_STATIC_PUBLIC_KEY_HEX
+            return _DEVNET_HPKE_STATIC_PUBLIC_KEY_HEX
         return None
 
 
@@ -134,10 +144,28 @@ def _resolve_edge_base_url(explicit: str | None, default: str = _DEFAULT_EDGE_BA
     return default
 
 
-def _resolve_noise_static_public_key_hex(
+def _infer_environment_from_edge_url(edge_base: str) -> Environment:
+    """Infer Environment from edge/REST host for HPKE pin baking."""
+    host = (edge_base or "").strip().lower()
+    for prefix in ("https://", "http://", "wss://", "ws://"):
+        if host.startswith(prefix):
+            host = host[len(prefix) :]
+            break
+    host = host.split("/", 1)[0]
+    host = host.split(":", 1)[0]
+    if host in ("127.0.0.1", "localhost") or host.endswith(".localhost"):
+        return Environment.LOCALNET
+    if "devnet" in host:
+        return Environment.DEVNET
+    if "godark-dex.com" in host:
+        return Environment.TESTNET
+    return Environment.TESTNET
+
+
+def _resolve_hpke_static_public_key_hex(
     explicit: str | None, environment: Environment
 ) -> str | None:
-    """Resolve HPKE/Noise pin: explicit arg → env vars → environment preset."""
+    """Resolve HPKE pin: explicit arg → env vars → environment preset."""
     if explicit is not None and str(explicit).strip() != "":
         return str(explicit).strip()
     for key in (
@@ -145,14 +173,11 @@ def _resolve_noise_static_public_key_hex(
         "GDX_HPKE_STATIC_PUBKEY",
         "GODARK_HPKE_STATIC_PUBLIC_KEY",
         "VITE_GDX_HPKE_STATIC_PUBKEY",
-        "GDX_NOISE_STATIC_PUBLIC_KEY",
-        "GDX_NOISE_STATIC_PUBKEY",
-        "GODARK_NOISE_STATIC_PUBLIC_KEY",
     ):
         v = os.environ.get(key, "").strip()
         if v:
             return v
-    return environment.noise_static_public_key_hex
+    return environment.hpke_static_public_key_hex
 
 
 def _resolve_user_uuid(explicit: str | None) -> str | None:
@@ -177,14 +202,23 @@ def _resolve_passphrase(explicit: str | None) -> str | None:
     return None
 
 
+def _rewrite_http_to_ws(url: str) -> str:
+    if url.startswith("http://"):
+        return "ws://" + url[len("http://") :]
+    if url.startswith("https://"):
+        return "wss://" + url[len("https://") :]
+    return url
+
+
 def _ws_url(base_url: str) -> str:
     """Return the canonical WebSocket URL ending in ``/ws/v1``.
 
+    - Rewrites ``http(s)://`` to ``ws(s)://``.
     - If ``base_url`` already ends with ``/ws/v1``, returns it unchanged.
     - If it ends with the legacy ``/ws`` suffix, upgrades it to ``/ws/v1``.
     - Otherwise, appends ``/ws/v1`` to the (slash-stripped) base.
     """
-    url = base_url.rstrip("/")
+    url = _rewrite_http_to_ws(base_url.rstrip("/"))
     if url.endswith("/ws/v1"):
         return url
     if url.endswith("/ws"):
@@ -204,7 +238,7 @@ class GodarkClient:
     """
     Async trading client for the GoDark DEX.
 
-    Handles API-key authentication, Noise XK session negotiation, bound-AEAD
+    Handles API-key authentication, HPKE session negotiation, bound-AEAD
     encrypted order flow, and real-time order/position streaming.
 
     Parameters:
@@ -215,7 +249,7 @@ class GodarkClient:
             ``GODARK_PASSPHRASE`` / ``GDX_PASSPHRASE``).
         environment: Named deployment preset (``Environment.TESTNET`` default).
             Supplies the default edge URL and, for Testnet/Devnet, each
-            environment's published sequencer Noise XK pin when those are not
+            environment's published sequencer HPKE pin when those are not
             set explicitly or via env.
         base_url: Edge WebSocket origin (host only, e.g.
             ``wss://api.godark-dex.com``). The client appends ``/ws/v1`` to
@@ -230,11 +264,10 @@ class GodarkClient:
         place_order_terminal_timeout: Seconds to wait after the fast place ack for
             an OPEN/reject/fill/cancel update when ``confirmation="book"``.
             Defaults to the command timeout.
-        noise_static_public_key_hex: Pinned 32-byte sequencer X25519 static key
-            in hexadecimal. Preference: arg → ``GDX_NOISE_STATIC_PUBLIC_KEY``
-            (aliases ``GDX_NOISE_STATIC_PUBKEY`` /
-            ``GODARK_NOISE_STATIC_PUBLIC_KEY``) → baked-in pin from
-            ``environment`` (Testnet/Devnet only).
+        hpke_static_public_key_hex: Pinned 32-byte sequencer X25519 static key
+            in hexadecimal. Preference: arg → ``GDX_HPKE_STATIC_PUBLIC_KEY``
+            (aliases ``GDX_HPKE_STATIC_PUBKEY`` / ``GODARK_HPKE_STATIC_PUBLIC_KEY``)
+            → baked-in pin from ``environment`` (Testnet/Devnet only).
 
     Usage::
 
@@ -248,7 +281,7 @@ class GodarkClient:
             api_key="test-key-1",
             environment=Environment.LOCALNET,
             user_uuid="00000000-0000-4000-8000-000000000001",
-            noise_static_public_key_hex="…",  # required on localnet
+            hpke_static_public_key_hex="…",  # required on localnet
         ) as client:
             ack = await client.place_order(
                 symbol="BTC-USDC-PERP", side="BUY", order_type="LIMIT",
@@ -272,7 +305,7 @@ class GodarkClient:
         transport: TransportConfig | None = None,
         stream_buffer_size: int = 256,
         place_order_terminal_timeout: float | None = None,
-        noise_static_public_key_hex: str | None = None,
+        hpke_static_public_key_hex: str | None = None,
     ):
         if api_key_id is not None or api_secret is not None:
             if api_key_id is None or api_secret is None:
@@ -300,8 +333,13 @@ class GodarkClient:
         self._user_symbol_map = symbol_map is not None
         self._symbol_map = dict(symbol_map) if symbol_map is not None else load_offline_symbol_map()
         self._transport_config = transport
-        self._noise_static_public_key_hex = _resolve_noise_static_public_key_hex(
-            noise_static_public_key_hex, environment
+        pin_env = (
+            _infer_environment_from_edge_url(base_url)
+            if base_url is not None and str(base_url).strip() != ""
+            else environment
+        )
+        self._hpke_static_public_key_hex = _resolve_hpke_static_public_key_hex(
+            hpke_static_public_key_hex, pin_env
         )
         self._place_order_terminal_timeout = (
             place_order_terminal_timeout
@@ -352,7 +390,13 @@ class GodarkClient:
         self._funding_rate_queue: asyncio.Queue[FundingRateUpdate] = asyncio.Queue(
             maxsize=stream_buffer_size
         )
+        self._open_orders_snapshot_queue: asyncio.Queue[OpenOrdersSnapshot] = asyncio.Queue(
+            maxsize=stream_buffer_size
+        )
         self._settlement_queue: asyncio.Queue[SettlementUpdate] = asyncio.Queue(
+            maxsize=stream_buffer_size
+        )
+        self._leverage_settings_queue: asyncio.Queue[LeverageSettings] = asyncio.Queue(
             maxsize=stream_buffer_size
         )
         self._order_callbacks: list[Callable[[OrderUpdate], None]] = []
@@ -362,7 +406,9 @@ class GodarkClient:
         self._balance_callbacks: list[Callable[[BalanceUpdate], None]] = []
         self._margin_alert_callbacks: list[Callable[[MarginAlert], None]] = []
         self._funding_rate_callbacks: list[Callable[[FundingRateUpdate], None]] = []
+        self._open_orders_snapshot_callbacks: list[Callable[[OpenOrdersSnapshot], None]] = []
         self._settlement_callbacks: list[Callable[[SettlementUpdate], None]] = []
+        self._leverage_settings_callbacks: list[Callable[[LeverageSettings], None]] = []
         self._reconnect_callbacks: list[Callable[[], None]] = []
         self._error_callbacks: list[Callable[[BaseException], None]] = []
         self._place_outcome_waiters: list[dict[str, Any]] = []
@@ -416,6 +462,7 @@ class GodarkClient:
 
         await self._transport.connect()
         self._transport.on_encrypted_push = self._handle_encrypted_push
+        self._transport.on_public_message = self._handle_public_message
         self._transport.on_rekey_required = lambda msg: asyncio.create_task(self._handle_rekey(msg))
         self._transport.on_disconnect = self._on_transport_disconnect
 
@@ -510,6 +557,7 @@ class GodarkClient:
         min_fill_size: float | None = None,
         expiry_time: int | None = None,
         confirmation: Literal["ack", "book"] = "book",
+        options: PlaceOrderOptions | None = None,
     ) -> OrderAck:
         """Place an order with explicit acknowledgement or book confirmation.
 
@@ -538,6 +586,7 @@ class GodarkClient:
             min_fill_size=min_fill_size,
             expiry_time=expiry_time,
             correlation_id_bytes=corr_id,
+            options=options,
             timestamp=_timestamp_ns(),
         )
 
@@ -576,6 +625,7 @@ class GodarkClient:
         symbol: str = "BTC-USDC-PERP",
         new_price: float | None = None,
         new_quantity: float | None = None,
+        new_trigger_price: float | None = None,
     ) -> OrderAck:
         """Modify an existing order's price and/or quantity."""
         self._ensure_ready()
@@ -588,10 +638,140 @@ class GodarkClient:
             symbol_id=symbol_id,
             new_price=new_price,
             new_quantity=new_quantity,
+            new_trigger_price=new_trigger_price,
             correlation_id_bytes=corr_id,
         )
 
         return await self._send_encrypted_order("modify", symbol_id, plaintext, corr_id)
+
+    async def update_leverage(self, symbol: str, leverage: int) -> OrderAck:
+        """Set per-symbol account leverage over encrypted WebSocket (HPKE).
+
+        Place and mass-quote inherit this setting server-side. Uses the legacy
+        ``encrypted_order`` binary frame (docs-wire has no ``update_leverage`` op).
+        """
+        self._ensure_ready()
+        symbol_id = self._resolve_symbol(symbol)
+        corr_id = _new_correlation_id()
+        plaintext = _proto.build_update_leverage_proto(
+            user_uuid=self._user_uuid_bytes(),
+            symbol_id=symbol_id,
+            leverage=leverage,
+            correlation_id_bytes=corr_id,
+        )
+        response = await self._send_encrypted_command(
+            "update_leverage",
+            "update_leverage",
+            symbol_id,
+            plaintext,
+            corr_id,
+        )
+        return self._parse_order_response(response)
+
+    async def cancel_all_orders(self, symbol: str | None = None) -> CountAck:
+        """Cancel all open orders. When ``symbol`` is ``None``, cancels every market."""
+        self._ensure_ready()
+        header_symbol_id = self._resolve_symbol(symbol) if symbol is not None else 0
+        body_symbol_id = self._resolve_symbol(symbol) if symbol is not None else None
+        corr_id = _new_correlation_id()
+        plaintext = _proto.build_cancel_all_proto(
+            body_symbol_id,
+            self._user_uuid_bytes(),
+            corr_id,
+        )
+        response = await self._send_encrypted_command(
+            "cancel_all", "order.cancel_all", header_symbol_id, plaintext, corr_id
+        )
+        return self._parse_count_ack_response(response, "cancel_all_ack")
+
+    async def close_all(self, symbol: str | None = None) -> CountAck:
+        """Close all positions at market (reduce-only IOC). Scoped when ``symbol`` is set."""
+        self._ensure_ready()
+        header_symbol_id = self._resolve_symbol(symbol) if symbol is not None else 0
+        body_symbol_id = self._resolve_symbol(symbol) if symbol is not None else None
+        corr_id = _new_correlation_id()
+        plaintext = _proto.build_close_all_proto(
+            body_symbol_id,
+            self._user_uuid_bytes(),
+            corr_id,
+        )
+        response = await self._send_encrypted_command(
+            "close_all", "order.close_all", header_symbol_id, plaintext, corr_id
+        )
+        return self._parse_count_ack_response(response, "close_all_ack")
+
+    async def reverse_position(self, symbol: str) -> CountAck:
+        """Reverse the open position on ``symbol`` (flatten + open opposite side)."""
+        self._ensure_ready()
+        symbol_id = self._resolve_symbol(symbol)
+        corr_id = _new_correlation_id()
+        plaintext = _proto.build_reverse_proto(
+            symbol_id,
+            self._user_uuid_bytes(),
+            corr_id,
+        )
+        response = await self._send_encrypted_command(
+            "reverse", "order.reverse", symbol_id, plaintext, corr_id
+        )
+        return self._parse_count_ack_response(response, "reverse_ack")
+
+    async def amend_tpsl(
+        self,
+        symbol: str,
+        order_id: str | int,
+        *,
+        take_profit_price: float | None = None,
+        stop_loss_price: float | None = None,
+        position_side: str | Side | None = None,
+    ) -> TpslAck:
+        """Amend / attach TP-SL on a resting order or open position."""
+        self._ensure_ready()
+        symbol_id = self._resolve_symbol(symbol)
+        oid = int(order_id)
+        if oid == 0 and position_side is None:
+            raise ValueError("position_side is required when order_id is 0")
+        corr_id = _new_correlation_id()
+        body_symbol_id = symbol_id if oid == 0 else None
+        plaintext = _proto.build_amend_tpsl_proto(
+            self._user_uuid_bytes(),
+            oid,
+            corr_id,
+            take_profit_price=take_profit_price,
+            stop_loss_price=stop_loss_price,
+            symbol_id=body_symbol_id,
+            position_side=position_side,
+        )
+        response = await self._send_encrypted_command(
+            "amend_tpsl", "amend_tpsl", symbol_id, plaintext, corr_id
+        )
+        return self._parse_tpsl_ack_response(response)
+
+    async def cancel_tpsl(
+        self,
+        symbol: str,
+        order_id: str | int,
+        *,
+        position_side: str | Side | None = None,
+    ) -> TpslAck:
+        """Cancel TP/SL without cancelling the parent entry or flattening the position."""
+        self._ensure_ready()
+        symbol_id = self._resolve_symbol(symbol)
+        oid = int(order_id)
+        if oid == 0 and position_side is None:
+            raise ValueError("position_side is required when order_id is 0")
+        corr_id = _new_correlation_id()
+        body_symbol_id = symbol_id if oid == 0 else None
+        plaintext = _proto.build_cancel_tpsl_proto(
+            self._user_uuid_bytes(),
+            oid,
+            corr_id,
+            symbol_id=body_symbol_id,
+            position_side=position_side,
+        )
+        response = await self._send_encrypted_command(
+            "cancel_tpsl", "cancel_tpsl", symbol_id, plaintext, corr_id
+        )
+        return self._parse_tpsl_ack_response(response)
 
     async def mass_quote(
         self,
@@ -701,7 +881,11 @@ class GodarkClient:
     async def subscribe(
         self, channels: tuple[str, ...] | list[str] = ("orders", "positions")
     ) -> None:
-        """Subscribe to order and/or position update channels."""
+        """Subscribe to private and/or public edge channels.
+
+        Private (HPKE encrypted): ``orders``, ``positions``, etc.
+        Public (JSON snapshot): ``funding_rate``, ``volume``, ``open_interest``.
+        """
         self._ensure_ready()
         ch_list = list(channels)
         for c in ch_list:
@@ -726,6 +910,11 @@ class GodarkClient:
     async def position_updates(self) -> AsyncIterator[PositionUpdate]:
         """Async iterator yielding position updates as they arrive."""
         async for u in self._queue_iter(self._position_queue):
+            yield u
+
+    async def leverage_settings_updates(self) -> AsyncIterator[LeverageSettings]:
+        """Async iterator yielding leverage settings pushes."""
+        async for u in self._queue_iter(self._leverage_settings_queue):
             yield u
 
     async def _queue_iter(self, queue: asyncio.Queue[TStream]) -> AsyncIterator[TStream]:
@@ -761,12 +950,24 @@ class GodarkClient:
         self._margin_alert_callbacks.append(callback)
 
     def on_funding_rate_update(self, callback: Callable[[FundingRateUpdate], None]) -> None:
-        """Register for per-symbol funding rate ticks."""
+        """Register for per-symbol funding rate updates.
+
+        Delivered from the public ``funding_rate`` WS channel (``funding_rate_snapshot``
+        JSON). Subscribe with ``await client.subscribe([..., "funding_rate"])``.
+        """
         self._funding_rate_callbacks.append(callback)
+
+    def on_open_orders_snapshot(self, callback: Callable[[OpenOrdersSnapshot], None]) -> None:
+        """Register for open-order book hydration batches."""
+        self._open_orders_snapshot_callbacks.append(callback)
 
     def on_settlement_update(self, callback: Callable[[SettlementUpdate], None]) -> None:
         """Register for settlement-batch lifecycle updates."""
         self._settlement_callbacks.append(callback)
+
+    def on_leverage_settings(self, callback: Callable[[LeverageSettings], None]) -> None:
+        """Register for per-symbol leverage settings pushes."""
+        self._leverage_settings_callbacks.append(callback)
 
     async def positions_snapshots(self) -> AsyncIterator[PositionsSnapshot]:
         """Iterate positions snapshot batches."""
@@ -817,7 +1018,7 @@ class GodarkClient:
         queue.put_nowait(item)
 
     # ------------------------------------------------------------------
-    # Internals: Noise XK session
+    # Internals: HPKE session
     # ------------------------------------------------------------------
 
     async def _setup_hpke_session(self) -> None:
@@ -825,7 +1026,7 @@ class GodarkClient:
         if self._user_uuid is None or self._conn_id == 0:
             raise SessionError("user_uuid and conn_id required before HPKE setup")
         try:
-            remote_static = pinned_sequencer_static_pub(self._noise_static_public_key_hex)
+            remote_static = pinned_sequencer_static_pub(self._hpke_static_public_key_hex)
         except ValueError as exc:
             raise SessionError(str(exc)) from exc
         try:
@@ -1079,6 +1280,64 @@ class GodarkClient:
             results=results,
         )
 
+    def _parse_count_ack_response(self, msg: dict, message_type: str) -> CountAck:
+        msg_type = msg.get("type")
+        if msg_type == "error":
+            raise OrderError(msg.get("message", "unknown error"))
+        if msg_type != "encrypted_push":
+            raise OrderError(f"Unexpected count ack response type: {msg_type}")
+
+        plaintext = self._decrypt_push_body(msg, message_type)
+        parsed = _proto.parse_count_ack(plaintext, message_type)
+        if parsed.get("type") != message_type:
+            if parsed.get("type") == "ack" and not parsed.get("success", True):
+                raise make_order_error_from_json(
+                    parsed.get("reject_text") or parsed.get("message"),
+                    str(parsed["error_code"]) if parsed.get("error_code") is not None else None,
+                )
+            raise OrderError(f"Expected {message_type}, got {parsed.get('type')}")
+        if parsed.get("error_code") is not None:
+            raise make_order_error_from_json(
+                parsed.get("reject_text"),
+                str(parsed["error_code"]),
+            )
+        return CountAck(
+            sequence=str(parsed.get("sequence", "")),
+            count=int(parsed.get("count", 0)),
+            order_ids=tuple(parsed.get("order_ids", [])),
+            error_code=parsed.get("error_code"),
+            reject_text=parsed.get("reject_text"),
+        )
+
+    def _parse_tpsl_ack_response(self, msg: dict) -> TpslAck:
+        msg_type = msg.get("type")
+        if msg_type == "error":
+            raise OrderError(msg.get("message", "unknown error"))
+        if msg_type != "encrypted_push":
+            raise OrderError(f"Unexpected tpsl ack response type: {msg_type}")
+
+        plaintext = self._decrypt_push_body(msg, "tpsl_ack")
+        parsed = _proto.parse_tpsl_ack(plaintext)
+        if parsed.get("type") != "tpsl_ack":
+            if parsed.get("type") == "ack" and not parsed.get("success", True):
+                raise make_order_error_from_json(
+                    parsed.get("reject_text") or parsed.get("message"),
+                    str(parsed["error_code"]) if parsed.get("error_code") is not None else None,
+                )
+            raise OrderError(f"Expected tpsl_ack, got {parsed.get('type')}")
+        if parsed.get("error_code") is not None:
+            raise make_order_error_from_json(
+                parsed.get("reject_text"),
+                str(parsed["error_code"]),
+            )
+        return TpslAck(
+            parent_order_id=str(parsed.get("parent_order_id", "")),
+            take_profit=parsed.get("take_profit"),
+            stop_loss=parsed.get("stop_loss"),
+            error_code=parsed.get("error_code"),
+            reject_text=parsed.get("reject_text"),
+        )
+
     def _decrypt_ack_push(self, msg: dict) -> OrderAck:
         if msg.get("_decrypt_error"):
             raise EncryptionError(f"Failed to decrypt ack: {msg['_decrypt_error']}")
@@ -1106,7 +1365,7 @@ class GodarkClient:
         )
 
     def _decrypt_push_body(self, msg: dict, default_message_type: str) -> bytes:
-        """Decrypt a Noise-bound response, retaining pre-decrypted ordered acks."""
+        """Decrypt a HPKE-bound response, retaining pre-decrypted ordered acks."""
         cached = msg.get("_decrypted_plaintext")
         if isinstance(cached, bytes):
             return cached
@@ -1128,6 +1387,18 @@ class GodarkClient:
     # Internals: push message handlers
     # ------------------------------------------------------------------
 
+    def _handle_public_message(self, msg: dict) -> None:
+        for update in _proto.parse_funding_rate_snapshot_json(msg):
+            self._dispatch_funding_rate_update(update)
+
+    def _dispatch_funding_rate_update(self, update: FundingRateUpdate) -> None:
+        if not update.funding_rate:
+            return
+        self._bounded_put(self._funding_rate_queue, update)
+        for cb in self._funding_rate_callbacks:
+            with contextlib.suppress(Exception):
+                cb(update)
+
     def _handle_encrypted_push(self, msg: dict) -> None:
         """Decrypt and dispatch an encrypted push frame."""
         self._dispatch_encrypted_push_in_order(msg)
@@ -1135,7 +1406,16 @@ class GodarkClient:
     def _dispatch_encrypted_push_in_order(self, msg: dict) -> None:
         message_type = msg.get("message_type", "")
 
-        if message_type in ("ack", "mass_quote_ack", "batch_cancel_ack", "batch_modify_ack"):
+        if message_type in (
+            "ack",
+            "mass_quote_ack",
+            "batch_cancel_ack",
+            "batch_modify_ack",
+            "cancel_all_ack",
+            "close_all_ack",
+            "reverse_ack",
+            "tpsl_ack",
+        ):
             # Resolve the in-flight command for any encrypted ack whose correlation
             # id matches the waiter (matches Go/Rust). Reject acks for batch ops
             # must surface to the caller instead of timing out.
@@ -1162,6 +1442,20 @@ class GodarkClient:
             err.__cause__ = e
             logger.error("Failed to decrypt push: %s", e)
             self._emit_error(err)
+            return
+
+        if message_type == "open_orders_snapshot":
+            # NodeResponse plaintext — field 3 collides with
+            # SequencerToEdgeMessage.funding_rate_update.
+            try:
+                snap = _proto.parse_open_orders_snapshot(plaintext)
+            except Exception as e:
+                err = GodarkError(f"Failed to parse open_orders_snapshot: {e}")
+                err.__cause__ = e
+                logger.error("Failed to parse open_orders_snapshot: %s", e)
+                self._emit_error(err)
+                return
+            self._dispatch_open_orders_snapshot(snap)
             return
 
         try:
@@ -1221,10 +1515,7 @@ class GodarkClient:
             return
 
         if isinstance(parsed, FundingRateUpdate):
-            self._bounded_put(self._funding_rate_queue, parsed)
-            for cb in self._funding_rate_callbacks:
-                with contextlib.suppress(Exception):
-                    cb(parsed)
+            self._dispatch_funding_rate_update(parsed)
             return
 
         if isinstance(parsed, SettlementUpdate):
@@ -1234,11 +1525,24 @@ class GodarkClient:
                     cb(parsed)
             return
 
+        if isinstance(parsed, LeverageSettings):
+            self._bounded_put(self._leverage_settings_queue, parsed)
+            for cb in self._leverage_settings_callbacks:
+                with contextlib.suppress(Exception):
+                    cb(parsed)
+            return
+
         if isinstance(parsed, UnknownSequencerPush):
             logger.debug(
                 "Ignoring sequencer push with unknown or empty inner (oneof=%r)",
                 parsed.oneof_field,
             )
+
+    def _dispatch_open_orders_snapshot(self, snap: OpenOrdersSnapshot) -> None:
+        self._bounded_put(self._open_orders_snapshot_queue, snap)
+        for cb in self._open_orders_snapshot_callbacks:
+            with contextlib.suppress(Exception):
+                cb(snap)
 
     @staticmethod
     def _is_terminal_place_update(update: OrderUpdate) -> bool:

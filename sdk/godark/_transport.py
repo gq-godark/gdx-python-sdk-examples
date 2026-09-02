@@ -77,13 +77,13 @@ def _normalize_inbound_message(msg: dict[str, Any]) -> dict[str, Any]:
             "session_id": data.get("session_id"),
         }
 
-    if op in ("noise.handshake", "noise_handshake"):
+    if op in ("hpke.setup", "hpke_setup"):
         if code != 0:
-            return {"type": "error", "message": err_text or "Noise handshake failed"}
+            return {"type": "error", "message": err_text or "HPKE setup failed"}
         if not isinstance(data, dict):
-            return {"type": "error", "message": "invalid Noise handshake response"}
+            return {"type": "error", "message": "invalid HPKE setup response"}
         return {
-            "type": "noise_handshake_reply",
+            "type": "hpke_setup_reply",
             "conn_id": data.get("conn_id"),
             "message": data.get("message", ""),
             "established": bool(data.get("established", False)),
@@ -193,7 +193,9 @@ class TransportConfig:
     additional_headers: Mapping[str, str] | None = None
     proxy: str | bool | None = True
     open_timeout: float | None = None
-    max_size: int | None = 65536
+    # Match Java/Go trading default: open_orders_snapshot frames grow with resting
+    # order count and routinely exceed the historical websockets 64 KiB default.
+    max_size: int | None = 8 * 1024 * 1024
     heartbeat_interval: float | None = None
     stale_timeout: float | None = None
     command_timeout: float | None = None
@@ -241,7 +243,7 @@ class EdgeTransport:
         # concurrently: each registers a future under its correlation id and
         # awaits it *without* holding a global lock, so throughput is bounded by
         # the server round-trip rather than one-command-at-a-time. Commands with
-        # no correlation id (e.g. the noise handshake) fall back to the single
+        # no correlation id (e.g. HPKE setup) fall back to the single
         # ``_cmd_future`` slot and are serialized via ``_cmd_lock``.
         self._cmd_future: asyncio.Future | None = None
         # Concurrent command waiters, keyed by header correlation id and by
@@ -268,6 +270,8 @@ class EdgeTransport:
         self.on_session_established: Callable | None = None
         self.on_rekey_required: Callable | None = None
         self.on_disconnect: Callable | None = None
+        # Public market snapshots (funding_rate, volume, open_interest) on /ws/v1.
+        self.on_public_message: Callable | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -295,7 +299,9 @@ class EdgeTransport:
 
     def _connect_kwargs(self) -> dict[str, Any]:
         kw: dict[str, Any] = {
-            "max_size": self._config.max_size if self._config.max_size is not None else 65536,
+            "max_size": self._config.max_size
+            if self._config.max_size is not None
+            else 8 * 1024 * 1024,
         }
         if self._config.ssl is not None:
             kw["ssl"] = self._config.ssl
@@ -344,7 +350,7 @@ class EdgeTransport:
 
         Encrypted trading ops stamp a 16-byte correlation id (hex) into the
         header. Returns "" when the payload has no correlation id (e.g. the
-        noise handshake), which selects the serialized single-slot path.
+        HPKE setup), which selects the serialized single-slot path.
         """
         header: Any = None
         args = payload.get("args")
@@ -565,7 +571,29 @@ class EdgeTransport:
 
     @staticmethod
     def _normalize_correlation_key(corr: Any) -> str:
-        return corr.lower() if isinstance(corr, str) and corr else ""
+        """Canonical hex key for correlation waiters.
+
+        Outbound headers stamp 32-char hex; encrypted ack pushes often echo the
+        same u128 as a decimal string. Normalize both to lowercase hex so
+        ``resolve_command`` can match concurrent waiters.
+        """
+        if isinstance(corr, int):
+            if corr < 0:
+                return ""
+            return corr.to_bytes(16, "big").hex()
+        if not isinstance(corr, str) or not corr:
+            return ""
+        s = corr.strip().lower()
+        if not s:
+            return ""
+        if s.isdigit():
+            try:
+                return int(s).to_bytes(16, "big").hex()
+            except (OverflowError, ValueError):
+                return s
+        if len(s) == 32 and all(c in "0123456789abcdef" for c in s):
+            return s
+        return s
 
     def resolve_command(self, result: dict) -> bool:
         """Resolve the pending command future with the given result.
@@ -710,10 +738,6 @@ class EdgeTransport:
             self.resolve_command(msg)
             return
 
-        if msg_type == "noise_handshake_reply":
-            self.resolve_command(msg)
-            return
-
         # Subscription acks (event-tagged, not type-tagged)
         if event in ("subscribe", "unsubscribe"):
             if self._sub_waiter and not self._sub_waiter.done() and event == self._sub_op:
@@ -731,6 +755,11 @@ class EdgeTransport:
         # present, else to the single serialized slot).
         if msg_type in ("ack", "error"):
             self.resolve_command(msg)
+            return
+
+        if msg_type in ("funding_rate_snapshot", "volume_snapshot", "open_interest_snapshot"):
+            if self.on_public_message:
+                self.on_public_message(msg)
             return
 
     async def _heartbeat_loop(self) -> None:

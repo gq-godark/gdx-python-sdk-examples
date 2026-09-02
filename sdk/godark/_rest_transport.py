@@ -87,9 +87,24 @@ class RestTransport:
         return _unwrap(r.json())
 
     async def session_setup(self, *, bearer: str, client_ecdh_pubkey: str) -> dict[str, Any]:
+        """Deprecated: ECDH REST session setup is retired (HPKE is WS-only).
+
+        Kept for transport unit tests / legacy probes; ``GodarkRestClient`` never calls this.
+        """
         r = await self._client.post(
             "/api/v1/session/setup",
             json={"client_ecdh_pubkey": client_ecdh_pubkey},
+            headers={"Authorization": f"Bearer {bearer}"},
+        )
+        r.raise_for_status()
+        return _unwrap(r.json())
+
+    async def post_encrypted(
+        self, *, path: str, bearer: str, body: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        r = await self._client.post(
+            path,
+            json=dict(body),
             headers={"Authorization": f"Bearer {bearer}"},
         )
         r.raise_for_status()
@@ -188,33 +203,9 @@ class RestTransport:
         r.raise_for_status()
         return _unwrap(r.json())
 
-    async def get_auth_me(self, *, bearer: str) -> dict[str, Any]:
-        r = await self._client.get(
-            "/api/v1/auth/me",
-            headers={"Authorization": f"Bearer {bearer}"},
-        )
-        r.raise_for_status()
-        return r.json()
-
-    async def get_shielded_pool_balances(self, *, bearer: str, owner: str) -> dict[str, Any]:
-        r = await self._client.get(
-            f"/api/v1/shielded-pool/balances/{owner}",
-            headers={"Authorization": f"Bearer {bearer}"},
-        )
-        r.raise_for_status()
-        return r.json()
-
     async def revoke_token(self, *, bearer: str) -> dict[str, Any]:
         r = await self._client.post(
             "/api/v1/auth/token/revoke",
-            headers={"Authorization": f"Bearer {bearer}"},
-        )
-        r.raise_for_status()
-        return _unwrap(r.json())
-
-    async def get_leverage(self, *, bearer: str) -> dict[str, Any]:
-        r = await self._client.get(
-            "/api/v1/leverage",
             headers={"Authorization": f"Bearer {bearer}"},
         )
         r.raise_for_status()
@@ -230,3 +221,30 @@ class RestTransport:
         )
         r.raise_for_status()
         return _unwrap(r.json())
+
+    async def get_funding_rates(self) -> list[Any]:
+        """``GET /api/v1/market-data/funding-rates`` — public, raw JSON array (no envelope)."""
+        r = await self._client.get("/api/v1/market-data/funding-rates")
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, list):
+            raise RestEnvelopeError(1500, "expected funding-rates array", None)
+        return data
+
+    async def get_open_interest(self) -> list[Any]:
+        """``GET /api/v1/market-data/open-interest`` — public, raw JSON array (no envelope)."""
+        r = await self._client.get("/api/v1/market-data/open-interest")
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, list):
+            raise RestEnvelopeError(1500, "expected open-interest array", None)
+        return data
+
+    async def get_volume(self) -> dict[str, Any]:
+        """``GET /api/v1/market-data/volume`` — public, raw JSON object (no envelope)."""
+        r = await self._client.get("/api/v1/market-data/volume")
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, dict):
+            raise RestEnvelopeError(1500, "expected volume object", None)
+        return data

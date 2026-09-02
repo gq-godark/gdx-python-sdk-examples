@@ -10,6 +10,7 @@ from .enums import (
     OrderUpdateType,
     PositionUpdateType,
     Side,
+    StpMode,
     TimeInForce,
 )
 from .errors import (
@@ -21,7 +22,12 @@ from .errors import (
     SessionError,
     TimeoutError,
 )
-from .market_data import MarketDataClient, subscription_callback_key
+from .market_data import (
+    MarketDataClient,
+    gomarket_ws_url,
+    resolve_market_data_ws_url,
+    subscription_callback_key,
+)
 from .order_error_code import (
     ORDER_ERROR_CODES,
     OrderErrorEntry,
@@ -42,6 +48,7 @@ from .types import (
     BatchCancelLegResult,
     BatchModifyAck,
     BatchModifyLegResult,
+    CountAck,
     FundingRateUpdate,
     LeverageSetting,
     LeverageSettings,
@@ -51,6 +58,7 @@ from .types import (
     MeProfile,
     OrderAck,
     OrderUpdate,
+    PlaceOrderOptions,
     PositionRow,
     PositionsSnapshot,
     PositionsSnapshotSource,
@@ -58,6 +66,7 @@ from .types import (
     SettlementBatchStatus,
     SettlementUpdate,
     SystemHealthUpdate,
+    TpslAck,
     UnknownSequencerPush,
 )
 
@@ -66,6 +75,8 @@ __all__ = [
     "GodarkClient",
     "GodarkRestClient",
     "MarketDataClient",
+    "gomarket_ws_url",
+    "resolve_market_data_ws_url",
     "subscription_callback_key",
     "TransportConfig",
     "Side",
@@ -75,6 +86,9 @@ __all__ = [
     "OrderUpdateType",
     "PositionUpdateType",
     "CancelReason",
+    "StpMode",
+    "CountAck",
+    "TpslAck",
     "PositionsSnapshotSource",
     "SettlementBatchStatus",
     "Balance",
@@ -83,6 +97,7 @@ __all__ = [
     "MeProfile",
     "OrderAck",
     "OrderUpdate",
+    "PlaceOrderOptions",
     "MassQuoteAck",
     "MassQuoteLegResult",
     "BatchCancelAck",

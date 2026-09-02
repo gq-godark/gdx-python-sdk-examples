@@ -20,6 +20,7 @@ TAG_LEN = 16
 WIRE_VERSION = 2
 
 INFO_DOMAIN = b"gdx-hpke/v1\0"
+INFO_DOMAIN_REST = b"gdx-hpke/v1/rest\0"
 EXPORT_C2S = b"gdx-hpke/v1 c2s"
 EXPORT_S2C = b"gdx-hpke/v1 s2c"
 
@@ -35,6 +36,13 @@ def info_for_conn(user_uuid: bytes, conn_id: int) -> bytes:
     if len(user_uuid) != 16:
         raise ValueError(f"user_uuid must be 16 bytes, got {len(user_uuid)}")
     return INFO_DOMAIN + user_uuid + conn_id.to_bytes(8, "big")
+
+
+def info_for_rest_request(user_uuid: bytes, request_id: int) -> bytes:
+    """``gdx-hpke/v1/rest\\0 ‖ user_uuid ‖ request_id_be``."""
+    if len(user_uuid) != 16:
+        raise ValueError(f"user_uuid must be 16 bytes, got {len(user_uuid)}")
+    return INFO_DOMAIN_REST + user_uuid + request_id.to_bytes(8, "big")
 
 
 def nonce_from_u64(counter: int) -> bytes:
@@ -137,9 +145,9 @@ def pinned_sequencer_static_pub(explicit_hex: str | None = None) -> bytes:
                 "GDX_HPKE_STATIC_PUBKEY",
                 "GODARK_HPKE_STATIC_PUBLIC_KEY",
                 "VITE_GDX_HPKE_STATIC_PUBKEY",
-                "GDX_NOISE_STATIC_PUBLIC_KEY",
-                "GDX_NOISE_STATIC_PUBKEY",
-                "GODARK_NOISE_STATIC_PUBLIC_KEY",
+                "GDX_HPKE_STATIC_PUBLIC_KEY",
+                "GDX_HPKE_STATIC_PUBKEY",
+                "GODARK_HPKE_STATIC_PUBLIC_KEY",
             )
             if os.environ.get(name, "").strip()
         ),
@@ -147,7 +155,7 @@ def pinned_sequencer_static_pub(explicit_hex: str | None = None) -> bytes:
     )
     if not value:
         raise ValueError(
-            "HPKE static public key unset — pass noise_static_public_key_hex "
+            "HPKE static public key unset — pass hpke_static_public_key_hex "
             "or set GDX_HPKE_STATIC_PUBLIC_KEY"
         )
     return parse_pinned_static_public_key(value)
