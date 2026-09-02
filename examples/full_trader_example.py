@@ -18,9 +18,11 @@ from godark import (
     Environment,
     FundingRateUpdate,
     GodarkClient,
+    LeverageSettings,
     MarginAlert,
     OrderType,
     OrderUpdate,
+    PlaceOrderOptions,
     PositionUpdate,
     PositionsSnapshot,
     SettlementUpdate,
@@ -162,6 +164,12 @@ async def main() -> int:
         bump("settlement")
         print(f"SETTLE batch={s.batch_id}  status={s.status}", flush=True)
 
+    def on_lev(ls: LeverageSettings) -> None:
+        bump("leverage_settings")
+        rows = ", ".join(f"{r.symbol_id}={r.leverage}x" for r in ls.settings[:5])
+        suffix = "..." if len(ls.settings) > 5 else ""
+        print(f"LEVERAGE settings=[{rows}{suffix}]", flush=True)
+
     def on_err(e: BaseException) -> None:
         non_fatal.append(str(e))
 
@@ -173,6 +181,7 @@ async def main() -> int:
     client.on_margin_alert(on_margin)
     client.on_funding_rate_update(on_fund)
     client.on_settlement_update(on_settle)
+    client.on_leverage_settings(on_lev)
     client.on_error(on_err)
 
     print("Connecting...")
@@ -269,6 +278,7 @@ async def main() -> int:
             0.05,
             price=sell_px,
             time_in_force=TimeInForce.GTC,
+            options=PlaceOrderOptions(post_only=True),
         )
         print(f"SELL placed: order_id={sell_ack.order_id}")
         await asyncio.sleep(0.5)
@@ -318,18 +328,14 @@ async def main() -> int:
     drain_orders("after MASS QUOTE")
 
     if resting_ids:
-        print(f"Batch-cancelling {len(resting_ids)} ladder orders (cleanup)...")
+        print("cancel_all_orders (cleanup ladder)...")
         try:
-            bc = await client.batch_cancel(SYMBOL, resting_ids)
-            for r in bc.results:
-                print(
-                    f"  cancel id={r.order_id}: cancelled={r.cancelled} err={r.error_code}",
-                    flush=True,
-                )
+            ca = await client.cancel_all_orders(SYMBOL)
+            print(f"  cancel_all: count={ca.count} ids={list(ca.order_ids)}", flush=True)
         except Exception as e:
-            print_order_error("Batch cancel rejected", e)
+            print_order_error("cancel_all rejected", e)
         await asyncio.sleep(0.5)
-        drain_orders("after BATCH CANCEL")
+        drain_orders("after CANCEL ALL")
 
     # Demonstrate the batch-level post_only flag on a crossing leg. Price a BUY
     # ~5% above the live mark: aggressive enough to cross the resting ask, yet
@@ -399,7 +405,8 @@ async def main() -> int:
         f"orders={counts['order_update']} positions={counts['position_update']} "
         f"snapshots={counts['positions_snapshot']} health={counts['system_health']} "
         f"balance={counts['balance_update']} margin={counts['margin_alert']} "
-        f"funding={counts['funding_rate']} settle={counts['settlement']}",
+        f"funding={counts['funding_rate']} settle={counts['settlement']} "
+        f"leverage={counts['leverage_settings']}",
         flush=True,
     )
     for msg in non_fatal:

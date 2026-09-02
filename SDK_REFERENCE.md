@@ -76,7 +76,7 @@ helper loads it from the repo root; OS environment variables win over `.env` val
 - `api_key_id`, `api_secret` — required pair (or single `api_key="<id>:<secret>"` token).
 - `base_url` — host-only WebSocket origin; SDK appends `/ws/v1`. Falls back to `GODARK_EDGE_URL` / `GDX_EDGE_URL` then production.
 - `user_uuid` — fallback used when the edge auth response omits a user id; falls back to `GODARK_USER_UUID` / `GDX_USER_UUID`.
-- `noise_static_public_key_hex` — pinned sequencer Noise static key (64 hex); defaults to `GDX_NOISE_STATIC_PUBLIC_KEY` and aliases.
+- `hpke_static_public_key_hex` — pinned sequencer HPKE static key (64 hex); defaults to `GDX_HPKE_STATIC_PUBLIC_KEY` and aliases.
 - `auto_reconnect=True` — automatically reconnect after transport drops.
 - `symbol_map=None` — override the default symbol-name → numeric-id table.
 - `transport=None` — `TransportConfig` for TLS, headers, timeouts, heartbeats.
@@ -89,7 +89,7 @@ helper loads it from the repo root; OS environment variables win over `.env` val
 | `place_order` | `async def place_order(symbol, side, order_type, quantity, price=None, time_in_force="GTC", aon=False, min_fill_size=None, expiry_time=None) -> OrderAck` | Place encrypted order; raises `OrderError` on rejection |
 | `update_leverage` | `async def update_leverage(symbol: str, leverage: int) -> OrderAck` | Set per-symbol account leverage (place/mass_quote inherit this) |
 | `cancel_order` | `async def cancel_order(order_id: str, symbol: str = "BTC-USDC-PERP") -> OrderAck` | Cancel by numeric id (passed as string) |
-| `modify_order` | `async def modify_order(order_id: str, symbol="BTC-USDC-PERP", new_price=None, new_quantity=None) -> OrderAck` | Amend price and/or quantity of a working order |
+| `modify_order` | `async def modify_order(order_id: str, symbol="BTC-USDC-PERP", new_price=None, new_quantity=None, new_trigger_price=None) -> OrderAck` | Amend price, quantity, and/or stop trigger |
 | `mass_quote` | `async def mass_quote(symbol, legs, post_only=None) -> MassQuoteAck` | Bulk cancel-replace ladder (up to 20 legs) |
 
 `side`, `order_type`, and `time_in_force` accept either the typed enum
@@ -259,18 +259,16 @@ name (e.g. `Side.SELL == "SELL"`, `str(OrderType.LIMIT) == "OrderType.LIMIT"`,
 `OrderType.LIMIT.value == "LIMIT"`).
 
 - `Side`: `BUY`, `SELL`
-- `OrderType`: `MARKET`, `LIMIT`, `PEG_TO_MID`, `PEG_TO_BID`, `PEG_TO_ASK`
+- `OrderType`: `MARKET`, `LIMIT`, `PEG`, `STOP_MARKET`, `STOP_LIMIT`
 - `TimeInForce`: `GTC`, `IOC`, `FOK`, `GTD`
 - `OrderStatus`: `NEW`, `PARTIALLY_FILLED`, `FILLED`, `CANCELLED`, `REJECTED`
 - `OrderUpdateType`: `OPEN`, `FILLED`, `PARTIALLY_FILLED`, `CANCELLED`, `REJECTED`, `MODIFIED`, `CANCEL_REJECTED`, `MODIFY_REJECTED`
 - `PositionUpdateType`: `SNAPSHOT`, `OPEN`, `INCREASE`, `DECREASE`, `CLOSE`, `FUNDING_APPLIED`
-- `CancelReason`: `USER_REQUESTED`, `IOC_REMAINDER`, `FOK_NOT_FILLED`, `EXPIRED`, `SYSTEM`
+- `CancelReason`: `USER_REQUESTED`, `IOC_REMAINDER`, `FOK_NOT_FILLED`, `EXPIRED`, `SYSTEM`, `ADL`, `LIQUIDATED_CANCELED`, `MARGIN_CANCELED`, `REDUCE_ONLY`, `STP_EXPIRE_TAKER`, `STP_CANCEL_RESTING`
 - `PositionsSnapshotSource`: `UNSPECIFIED`, `INITIAL`, `PERIODIC`, `EVENT`
 - `SettlementBatchStatus`: `UNSPECIFIED`, `SUBMITTED`, `CONFIRMED`, `FAILED`
 
-Note: the SDK enum includes additional order types (`PEG_TO_*`) for
-compatibility, but this MM distribution supports placing only `MARKET` and
-`LIMIT` orders.
+`PlaceOrderOptions` (`options` on `place_order`) includes `reduce_only`, `post_only`, `stp_mode`, `peg_offset_bps`, `trigger_price`, `take_profit_price`, and `stop_loss_price`. `PEG` pegs to the Pyth oracle mark.
 
 ## Errors
 

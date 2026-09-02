@@ -75,6 +75,41 @@ class BatchModifyAck:
 
 
 @dataclass(frozen=True)
+class TpslAck:
+    """RPC reply for amend / cancel TP-SL (``NodeResponse.tpsl_ack``)."""
+
+    parent_order_id: str
+    take_profit: str | None = None
+    stop_loss: str | None = None
+    error_code: int | None = None
+    reject_text: str | None = None
+
+
+@dataclass(frozen=True)
+class CountAck:
+    """Ack for account-wide ``cancel_all`` / ``close_all`` or per-symbol ``reverse``."""
+
+    sequence: str
+    count: int
+    order_ids: tuple[str, ...] = ()
+    error_code: int | None = None
+    reject_text: str | None = None
+
+
+@dataclass(frozen=True)
+class PlaceOrderOptions:
+    """Optional place-order flags mirrored from gdx-web / ``PlaceOrderInput``."""
+
+    reduce_only: bool = False
+    post_only: bool = False
+    stp_mode: str = "UNSPECIFIED"
+    peg_offset_bps: int | None = None
+    trigger_price: float | None = None
+    take_profit_price: float | None = None
+    stop_loss_price: float | None = None
+
+
+@dataclass(frozen=True)
 class OrderUpdate:
     order_id: str
     user_uuid: str

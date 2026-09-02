@@ -145,9 +145,9 @@ def pinned_sequencer_static_pub(explicit_hex: str | None = None) -> bytes:
                 "GDX_HPKE_STATIC_PUBKEY",
                 "GODARK_HPKE_STATIC_PUBLIC_KEY",
                 "VITE_GDX_HPKE_STATIC_PUBKEY",
-                "GDX_NOISE_STATIC_PUBLIC_KEY",
-                "GDX_NOISE_STATIC_PUBKEY",
-                "GODARK_NOISE_STATIC_PUBLIC_KEY",
+                "GDX_HPKE_STATIC_PUBLIC_KEY",
+                "GDX_HPKE_STATIC_PUBKEY",
+                "GODARK_HPKE_STATIC_PUBLIC_KEY",
             )
             if os.environ.get(name, "").strip()
         ),
@@ -155,7 +155,7 @@ def pinned_sequencer_static_pub(explicit_hex: str | None = None) -> bytes:
     )
     if not value:
         raise ValueError(
-            "HPKE static public key unset — pass noise_static_public_key_hex "
+            "HPKE static public key unset — pass hpke_static_public_key_hex "
             "or set GDX_HPKE_STATIC_PUBLIC_KEY"
         )
     return parse_pinned_static_public_key(value)

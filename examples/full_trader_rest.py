@@ -17,6 +17,11 @@ def _live_price() -> float:
     return 78000.0
 
 
+def _rest_limit_price() -> float:
+    """BUY limit well below touch so place/modify/cancel stay in the book."""
+    return _live_price() - 5000.0
+
+
 async def main() -> int:
     load_dotenv()
 
@@ -45,7 +50,7 @@ async def main() -> int:
         )
         return 1
 
-    price = _live_price()
+    price = _rest_limit_price()
     async with client:
         print(
             f"identity: user_uuid={client.user_uuid_str} scope={client.token_scope}"
@@ -60,7 +65,7 @@ async def main() -> int:
             "BTC-USDC-PERP",
             "BUY",
             type="LIMIT",
-            quantity=0.001,
+            quantity=0.01,
             price=price,
             client_order_id="sdk-python-rest-demo",
         )
