@@ -22,6 +22,3 @@ Homepage = "https://godark.exchange"
 
 [tool.hatch.build.targets.wheel]
 packages = ["godark"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"shared/symbols.json" = "godark/symbols.json"
