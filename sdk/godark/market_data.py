@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import os
+import time
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -14,7 +15,7 @@ from typing import Any
 import websockets
 from websockets.asyncio.client import ClientConnection
 
-from ._transport import TransportConfig
+from ._transport import EdgeTransport, TransportConfig
 from .client import _ws_url
 from .errors import GodarkError
 
@@ -131,16 +132,35 @@ class MarketDataClient:
         await client.disconnect()
     """
 
-    HEARTBEAT_INTERVAL = 30.0
+    HEARTBEAT_INTERVAL = EdgeTransport.HEARTBEAT_INTERVAL
 
     def __init__(self, base_url: str, transport: TransportConfig | None = None):
         self._url = resolve_market_data_ws_url(base_url.strip())
         self._docs_wire = _is_docs_wire_url(self._url)
         self._transport_config = transport or TransportConfig()
+        self._heartbeat_interval: float = (
+            self._transport_config.heartbeat_interval
+            if self._transport_config.heartbeat_interval is not None
+            else EdgeTransport.HEARTBEAT_INTERVAL
+        )
+        self._stale_timeout: float = (
+            self._transport_config.stale_timeout
+            if self._transport_config.stale_timeout is not None
+            else EdgeTransport.STALE_TIMEOUT
+        )
+        self._missed_heartbeat_limit: int = (
+            self._transport_config.missed_heartbeat_limit
+            if self._transport_config.missed_heartbeat_limit is not None
+            else EdgeTransport.MISSED_HEARTBEAT_LIMIT
+        )
         self._ws: ClientConnection | None = None
         self._connected = False
+        self._last_inbound: float = 0.0
+        self._inbound_since_ping = True
+        self._missed_heartbeat_count = 0
         self._recv_task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None
+        self._reconnect_task: asyncio.Task | None = None
         self._callbacks: dict[str, Callable] = {}
         self._auto_reconnect = True
         # (channel, symbol) for symbol streams; public channels use ("__public__", channel)
@@ -166,6 +186,11 @@ class MarketDataClient:
     def is_connected(self) -> bool:
         return self._connected and self._ws is not None
 
+    def _note_inbound(self) -> None:
+        self._last_inbound = time.monotonic()
+        self._inbound_since_ping = True
+        self._missed_heartbeat_count = 0
+
     async def connect(self) -> None:
         """Open WebSocket to the resolved market-data endpoint."""
         if self._heartbeat_task:
@@ -174,6 +199,9 @@ class MarketDataClient:
             self._recv_task.cancel()
         self._ws = await websockets.connect(self._url, **self._connect_kwargs())
         self._connected = True
+        self._last_inbound = time.monotonic()
+        self._inbound_since_ping = True
+        self._missed_heartbeat_count = 0
         self._recv_task = asyncio.create_task(self._recv_loop())
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         await self._resubscribe_all()
@@ -291,6 +319,7 @@ class MarketDataClient:
     async def _recv_loop(self) -> None:
         try:
             async for raw in self._ws:
+                self._note_inbound()
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
@@ -316,24 +345,60 @@ class MarketDataClient:
             logger.error("Market data recv error: %s", e)
         finally:
             self._connected = False
-            if self._auto_reconnect:
-                asyncio.create_task(self._reconnect())
+            if self._auto_reconnect and (
+                self._reconnect_task is None or self._reconnect_task.done()
+            ):
+                self._reconnect_task = asyncio.create_task(self._reconnect())
 
     async def _heartbeat_loop(self) -> None:
         try:
             while self._connected:
-                await asyncio.sleep(self.HEARTBEAT_INTERVAL)
+                await asyncio.sleep(self._heartbeat_interval)
+                if not self._connected:
+                    break
+                elapsed = time.monotonic() - self._last_inbound
+                if elapsed > self._stale_timeout:
+                    reason = f"stale heartbeat: no inbound message for {self._stale_timeout:.0f}s"
+                    logger.warning(
+                        "Market data stale connection (%.1fs no inbound), closing", elapsed
+                    )
+                    if self._ws:
+                        await self._ws.close(4000, reason)
+                    break
+
+                if not self._inbound_since_ping:
+                    self._missed_heartbeat_count += 1
+                else:
+                    self._missed_heartbeat_count = 0
+
+                if self._missed_heartbeat_count >= self._missed_heartbeat_limit:
+                    reason = (
+                        f"stale heartbeat: missed {self._missed_heartbeat_count} "
+                        f"heartbeat responses (limit {self._missed_heartbeat_limit})"
+                    )
+                    logger.warning("Market data %s, closing", reason)
+                    if self._ws:
+                        await self._ws.close(4000, reason)
+                    break
+
                 if self._ws and self._connected:
                     try:
                         if self._docs_wire:
                             ping: dict[str, Any] = {
                                 "id": str(uuid.uuid4()),
                                 "op": "ping",
+                                "args": {},
                             }
                         else:
                             ping = {"action": "ping"}
                         await self._ws.send(json.dumps(ping))
-                    except Exception:
+                        self._inbound_since_ping = False
+                    except Exception as exc:
+                        reason = f"stale heartbeat: ping send failed: {exc}"
+                        logger.warning("Market data %s", reason)
+                        if self._ws:
+                            with contextlib.suppress(Exception):
+                                await self._ws.close(4000, reason)
                         break
         except asyncio.CancelledError:
             return

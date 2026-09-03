@@ -198,6 +198,7 @@ class TransportConfig:
     max_size: int | None = 8 * 1024 * 1024
     heartbeat_interval: float | None = None
     stale_timeout: float | None = None
+    missed_heartbeat_limit: int | None = None
     command_timeout: float | None = None
     use_docs_wire: bool = True
 
@@ -210,7 +211,8 @@ class EdgeTransport:
     """
 
     HEARTBEAT_INTERVAL = 30.0
-    STALE_TIMEOUT = 60.0
+    STALE_TIMEOUT = 120.0
+    MISSED_HEARTBEAT_LIMIT = 2
     COMMAND_TIMEOUT = 30.0
 
     def __init__(self, url: str, config: TransportConfig | None = None):
@@ -226,6 +228,11 @@ class EdgeTransport:
             if self._config.stale_timeout is not None
             else self.STALE_TIMEOUT
         )
+        self._missed_heartbeat_limit: int = (
+            self._config.missed_heartbeat_limit
+            if self._config.missed_heartbeat_limit is not None
+            else self.MISSED_HEARTBEAT_LIMIT
+        )
         self._command_timeout: float = (
             self._config.command_timeout
             if self._config.command_timeout is not None
@@ -234,6 +241,8 @@ class EdgeTransport:
         self._ws: ClientConnection | None = None
         self._connected = False
         self._last_inbound: float = 0.0
+        self._inbound_since_ping = True
+        self._missed_heartbeat_count = 0
         self._heartbeat_task: asyncio.Task | None = None
         self._recv_task: asyncio.Task | None = None
 
@@ -270,6 +279,7 @@ class EdgeTransport:
         self.on_session_established: Callable | None = None
         self.on_rekey_required: Callable | None = None
         self.on_disconnect: Callable | None = None
+        self.on_stale: Callable[[str], None] | None = None
         # Public market snapshots (funding_rate, volume, open_interest) on /ws/v1.
         self.on_public_message: Callable | None = None
 
@@ -288,11 +298,26 @@ class EdgeTransport:
     def _new_wire_id(self) -> str:
         return str(uuid.uuid4())
 
+    def _note_inbound(self) -> None:
+        """Record inbound traffic and reset missed-heartbeat tracking."""
+        self._last_inbound = time.monotonic()
+        self._inbound_since_ping = True
+        self._missed_heartbeat_count = 0
+
+    def _notify_stale(self, reason: str) -> None:
+        if self.on_stale:
+            try:
+                self.on_stale(reason)
+            except Exception:
+                logger.debug("on_stale callback raised", exc_info=True)
+
     async def connect(self) -> None:
         """Open WebSocket connection."""
         self._ws = await self._open_connection()
         self._connected = True
         self._last_inbound = time.monotonic()
+        self._inbound_since_ping = True
+        self._missed_heartbeat_count = 0
         self._recv_task = asyncio.create_task(self._recv_loop())
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         logger.info("Connected to %s", self._url)
@@ -680,7 +705,7 @@ class EdgeTransport:
         """Background task: read messages from WebSocket and dispatch."""
         try:
             async for raw in self._ws:
-                self._last_inbound = time.monotonic()
+                self._note_inbound()
                 if isinstance(raw, bytes):
                     self._dispatch_binary(raw)
                     continue
@@ -771,10 +796,29 @@ class EdgeTransport:
                     break
                 elapsed = time.monotonic() - self._last_inbound
                 if elapsed > self._stale_timeout:
+                    reason = f"stale heartbeat: no inbound message for {self._stale_timeout:.0f}s"
                     logger.warning("Stale connection (%.1fs no inbound), closing", elapsed)
+                    self._notify_stale(reason)
                     if self._ws:
-                        await self._ws.close(4000, "heartbeat timeout")
+                        await self._ws.close(4000, reason)
                     break
+
+                if not self._inbound_since_ping:
+                    self._missed_heartbeat_count += 1
+                else:
+                    self._missed_heartbeat_count = 0
+
+                if self._missed_heartbeat_count >= self._missed_heartbeat_limit:
+                    reason = (
+                        f"stale heartbeat: missed {self._missed_heartbeat_count} "
+                        f"heartbeat responses (limit {self._missed_heartbeat_limit})"
+                    )
+                    logger.warning("%s, closing", reason)
+                    self._notify_stale(reason)
+                    if self._ws:
+                        await self._ws.close(4000, reason)
+                    break
+
                 try:
                     if self._use_docs_wire:
                         await self.send_json(
@@ -786,7 +830,14 @@ class EdgeTransport:
                         )
                     else:
                         await self.send_json({"type": "ping"})
-                except Exception:
+                    self._inbound_since_ping = False
+                except Exception as exc:
+                    reason = f"stale heartbeat: ping send failed: {exc}"
+                    logger.warning("%s", reason)
+                    self._notify_stale(reason)
+                    if self._ws:
+                        with contextlib.suppress(Exception):
+                            await self._ws.close(4000, reason)
                     break
         except asyncio.CancelledError:
             return

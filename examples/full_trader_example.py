@@ -59,7 +59,8 @@ async def main() -> int:
         open_timeout=10.0,
         command_timeout=10.0,
         heartbeat_interval=30.0,
-        stale_timeout=60.0,
+        stale_timeout=120.0,
+        missed_heartbeat_limit=2,
     )
 
     counts: dict[str, int] = defaultdict(int)
