@@ -465,6 +465,7 @@ class GodarkClient:
         self._transport.on_public_message = self._handle_public_message
         self._transport.on_rekey_required = lambda msg: asyncio.create_task(self._handle_rekey(msg))
         self._transport.on_disconnect = self._on_transport_disconnect
+        self._transport.on_stale = self._on_transport_stale
 
         auth_result = await self._transport.authenticate(self._auth_token)
         if not auth_result.get("success"):
@@ -1640,11 +1641,16 @@ class GodarkClient:
             logger.error("Rekey failed: %s", e)
             self._emit_error(err)
 
+    def _on_transport_stale(self, reason: str) -> None:
+        self._emit_error(ConnectionError(reason))
+
     def _on_transport_disconnect(self) -> None:
         self._connected = False
         self._pending_encrypted_by_nonce.clear()
         self._clear_place_outcomes(ConnectionError("Disconnected before book confirmation"))
         if self._intentional_close or not self._auto_reconnect:
+            return
+        if self._reconnect_task is not None and not self._reconnect_task.done():
             return
         self._reconnect_task = asyncio.create_task(self._reconnect_loop())
 
