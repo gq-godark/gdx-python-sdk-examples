@@ -31,6 +31,7 @@ mkdir -p "$DEST_SDK/godark" "$DEST_SDK/shared"
 rsync -a --delete \
   --exclude '__pycache__' \
   --exclude '*.pyc' \
+  --exclude 'symbols.json' \
   "$SRC/src/godark/" "$DEST_SDK/godark/"
 
 cp "$SRC/shared/symbols.json" "$DEST_SDK/shared/symbols.json"

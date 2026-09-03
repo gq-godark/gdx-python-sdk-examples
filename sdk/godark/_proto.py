@@ -189,7 +189,9 @@ def _parse_snapshot_variant(
     return variant or "unknown", {"type": variant or "unknown"}
 
 
-def _decode_rest_variant(variant: str, payload: bytes, *, full_data: bytes) -> tuple[str, Any]:
+def _decode_rest_variant(
+    variant: str, payload: bytes, *, full_data: bytes
+) -> tuple[str, Any]:
     count_ack_configs: dict[str, tuple[type, str, str]] = {
         "cancel_all_ack": (sequencer_pb2.CancelAllAck, "cancelled", "cancelled_order_ids"),
         "close_all_ack": (sequencer_pb2.CloseAllAck, "closed", "close_order_ids"),
@@ -205,7 +207,9 @@ def _decode_rest_variant(variant: str, payload: bytes, *, full_data: bytes) -> t
     return _parse_snapshot_variant(variant, payload, full_data=full_data)
 
 
-def _parse_node_response_with_expected(data: bytes, expected: str | None) -> tuple[str, Any]:
+def _parse_node_response_with_expected(
+    data: bytes, expected: str | None
+) -> tuple[str, Any]:
     variant, payload = _resolve_rest_payload(data, expected)
     try:
         return _decode_rest_variant(variant, payload, full_data=data)
