@@ -268,7 +268,7 @@ name (e.g. `Side.SELL == "SELL"`, `str(OrderType.LIMIT) == "OrderType.LIMIT"`,
 - `PositionsSnapshotSource`: `UNSPECIFIED`, `INITIAL`, `PERIODIC`, `EVENT`
 - `SettlementBatchStatus`: `UNSPECIFIED`, `SUBMITTED`, `CONFIRMED`, `FAILED`
 
-`PlaceOrderOptions` (`options` on `place_order`) includes `reduce_only`, `post_only`, `stp_mode`, `peg_offset_bps`, `trigger_price`, `take_profit_price`, and `stop_loss_price`. `PEG` pegs to the Pyth oracle mark.
+`PlaceOrderOptions` (`options` on `place_order`) includes `reduce_only`, `post_only`, `stp_mode`, `peg_offset_bps`, `trigger_price`, `take_profit_price`, `stop_loss_price`, and `slippage_bps`. Omit `slippage_bps` to use the venue max walk cap (localnet 5%); typical explicit values are 50–500 bps (0.5%–5%). `PEG` pegs to the Pyth oracle mark.
 
 ## Errors
 
