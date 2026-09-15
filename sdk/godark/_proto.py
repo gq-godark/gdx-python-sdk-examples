@@ -285,6 +285,8 @@ def build_place_order_proto(
         place.take_profit_price = opts.take_profit_price
     if opts.stop_loss_price is not None:
         place.stop_loss_price = opts.stop_loss_price
+    if opts.slippage_bps is not None:
+        place.slippage_bps = opts.slippage_bps
 
     req = sequencer_pb2.EdgeSequencerRequest(place=place)
     return req.SerializeToString()

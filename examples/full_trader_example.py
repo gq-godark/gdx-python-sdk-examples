@@ -248,26 +248,44 @@ async def main() -> int:
         )
         print(f"BUY placed: order_id={buy_ack.order_id}  sequence={buy_ack.sequence}")
     except Exception as e:
-        print_order_error("BUY rejected", e)
-        await client.disconnect()
-        return 1
+        print_order_error("BUY rejected (continuing to market Place)", e)
+        buy_ack = None
 
     await asyncio.sleep(1)
     drain_orders("after BUY")
 
-    modify_px = round(mark * 0.996, 1)
-    print(f"Modifying order price to {modify_px}...")
-    assert buy_ack is not None
+    if buy_ack is not None:
+        modify_px = round(mark * 0.996, 1)
+        print(f"Modifying order price to {modify_px}...")
+        try:
+            mod_ack = await client.modify_order(
+                str(buy_ack.order_id), SYMBOL, new_price=modify_px
+            )
+            print(f"Modified: order_id={mod_ack.order_id}")
+        except Exception as e:
+            print_order_error("Modify rejected", e)
+
+        await asyncio.sleep(1)
+        drain_orders("after MODIFY")
+
+    # Market IOC with explicit walk cap: 50 bps = 0.5% of mark (UI default).
+    # Omit slippage_bps → venue max (localnet 5%).
+    print("Placing market IOC BUY qty=0.01 with slippage_bps=50 (0.5% walk)...")
     try:
-        mod_ack = await client.modify_order(
-            str(buy_ack.order_id), SYMBOL, new_price=modify_px
+        mkt_ack = await client.place_order(
+            SYMBOL,
+            Side.BUY,
+            OrderType.MARKET,
+            0.01,
+            time_in_force=TimeInForce.IOC,
+            options=PlaceOrderOptions(slippage_bps=50),
         )
-        print(f"Modified: order_id={mod_ack.order_id}")
+        print(f"MARKET BUY placed: order_id={mkt_ack.order_id}")
     except Exception as e:
-        print_order_error("Modify rejected", e)
+        print_order_error("Market BUY rejected (continuing)", e)
 
     await asyncio.sleep(1)
-    drain_orders("after MODIFY")
+    drain_orders("after MARKET BUY")
 
     sell_px = round(mark * 1.03, 1)
     print(f"Placing limit SELL @ {sell_px}...")
@@ -392,7 +410,8 @@ async def main() -> int:
 
     print("Cancelling original BUY (cleanup)...")
     try:
-        await client.cancel_order(str(buy_ack.order_id), SYMBOL)
+        if buy_ack is not None:
+            await client.cancel_order(str(buy_ack.order_id), SYMBOL)
         print("Original BUY cancelled")
     except Exception:
         print("Original BUY already filled or cancelled")
