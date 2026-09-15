@@ -161,7 +161,7 @@ All enums inherit from `str, Enum` (e.g. `Side.SELL == "SELL"`).
 - `PositionUpdateType`: `SNAPSHOT`, `OPEN`, `INCREASE`, `DECREASE`, `CLOSE`, `FUNDING_APPLIED`
 - `CancelReason`: `USER_REQUESTED`, `IOC_REMAINDER`, `FOK_NOT_FILLED`, `EXPIRED`, `SYSTEM`, `ADL`, `LIQUIDATED_CANCELED`, `MARGIN_CANCELED`, `REDUCE_ONLY`, `STP_EXPIRE_TAKER`, `STP_CANCEL_RESTING`
 
-`PlaceOrderOptions` includes `peg_offset_bps`, `trigger_price`, `take_profit_price`, and `stop_loss_price`. `PEG` pegs to the Pyth oracle mark.
+`PlaceOrderOptions` includes `peg_offset_bps`, `trigger_price`, `take_profit_price`, `stop_loss_price`, and `slippage_bps`. Omit `slippage_bps` to use the venue max walk cap (localnet 5%); typical explicit values are 50–500 bps (0.5%–5%). `PEG` pegs to the Pyth oracle mark.
 
 ## Errors
 

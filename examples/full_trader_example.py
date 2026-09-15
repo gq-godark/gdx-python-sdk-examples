@@ -269,6 +269,25 @@ async def main() -> int:
     await asyncio.sleep(1)
     drain_orders("after MODIFY")
 
+    # Market IOC with explicit walk cap: 50 bps = 0.5% of mark (UI default).
+    # Omit slippage_bps → venue max (localnet 5%).
+    print("Placing market IOC BUY qty=0.01 with slippage_bps=50 (0.5% walk)...")
+    try:
+        mkt_ack = await client.place_order(
+            SYMBOL,
+            Side.BUY,
+            OrderType.MARKET,
+            0.01,
+            time_in_force=TimeInForce.IOC,
+            options=PlaceOrderOptions(slippage_bps=50),
+        )
+        print(f"MARKET BUY placed: order_id={mkt_ack.order_id}")
+    except Exception as e:
+        print_order_error("Market BUY rejected (continuing)", e)
+
+    await asyncio.sleep(1)
+    drain_orders("after MARKET BUY")
+
     sell_px = round(mark * 1.03, 1)
     print(f"Placing limit SELL @ {sell_px}...")
     try:
