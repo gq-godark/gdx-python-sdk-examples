@@ -16,9 +16,15 @@ class SessionError(GodarkError):
 class OrderError(GodarkError):
     """Order was rejected by the sequencer."""
 
-    def __init__(self, message: str, error_code: str | None = None):
+    def __init__(
+        self,
+        message: str,
+        error_code: str | None = None,
+        user_message: str | None = None,
+    ):
         super().__init__(message)
         self.error_code = error_code
+        self.user_message = user_message
 
 
 class ConnectionError(GodarkError):  # noqa: A001

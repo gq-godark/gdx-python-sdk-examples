@@ -107,6 +107,7 @@ class PlaceOrderOptions:
     trigger_price: float | None = None
     take_profit_price: float | None = None
     stop_loss_price: float | None = None
+    slippage_bps: int | None = None
 
 
 @dataclass(frozen=True)

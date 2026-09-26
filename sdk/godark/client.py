@@ -60,6 +60,7 @@ from .types import (
     TpslAck,
     UnknownSequencerPush,
 )
+from .ws_admit_error_code import is_ws_admit_code, resolve_ws_admit_message
 
 TStream = TypeVar("TStream")
 
@@ -1151,6 +1152,17 @@ class GodarkClient:
         msg_type = msg.get("type")
 
         if msg_type == "error":
+            raw_code = msg.get("error_code")
+            parsed_code: int | None = None
+            if isinstance(raw_code, int):
+                parsed_code = raw_code
+            elif isinstance(raw_code, str) and raw_code.strip().isdigit():
+                parsed_code = int(raw_code.strip())
+            if parsed_code is not None and is_ws_admit_code(parsed_code):
+                raise OrderError(
+                    resolve_ws_admit_message(parsed_code, msg.get("message", "request failed")),
+                    error_code=str(parsed_code),
+                )
             raise make_order_error_from_json(msg.get("message"), msg.get("error_code"))
 
         if msg_type == "ack":
@@ -1446,8 +1458,7 @@ class GodarkClient:
             return
 
         if message_type == "open_orders_snapshot":
-            # NodeResponse plaintext — field 3 collides with
-            # SequencerToEdgeMessage.funding_rate_update.
+            # Bare OpenOrdersSnapshot (or legacy NodeResponse wrapper).
             try:
                 snap = _proto.parse_open_orders_snapshot(plaintext)
             except Exception as e:
@@ -1460,7 +1471,7 @@ class GodarkClient:
             return
 
         try:
-            parsed = _proto.parse_sequencer_to_edge_message(plaintext)
+            parsed = _proto.parse_sequencer_to_edge_message(plaintext, message_type)
         except Exception as e:
             err = GodarkError(f"Failed to parse encrypted push body: {e}")
             err.__cause__ = e
@@ -1471,7 +1482,7 @@ class GodarkClient:
         self._dispatch_sequencer_push(parsed)
 
     def _dispatch_sequencer_push(self, parsed: _proto.SequencerPush) -> None:
-        """Route decrypted ``SequencerToEdgeMessage`` inner variants to queues + callbacks."""
+        """Route decrypted bare sequencer push variants to queues + callbacks."""
         if isinstance(parsed, OrderUpdate):
             self._observe_order_update(parsed)
             self._bounded_put(self._order_queue, parsed)
