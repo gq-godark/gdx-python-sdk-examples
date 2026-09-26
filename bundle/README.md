@@ -90,6 +90,7 @@ async def main():
     async with GodarkClient(
         api_key_id=os.environ["GODARK_API_KEY_ID"],
         api_secret=os.environ["GODARK_API_SECRET"],
+        passphrase=os.environ["GODARK_PASSPHRASE"],
         base_url=os.environ.get("GODARK_EDGE_URL", "wss://api.godark-dex.com"),
     ) as client:
         ack = await client.place_order(

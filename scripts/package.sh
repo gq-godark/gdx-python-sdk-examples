@@ -40,11 +40,6 @@ for required in bundle/README.md bundle/SDK_REFERENCE.md .env.example examples/q
     exit 1
   fi
 done
-if ! command -v zip >/dev/null 2>&1; then
-  echo "error: 'zip' not found in PATH (apt-get install zip)" >&2
-  exit 1
-fi
-
 # ---- build wheel ----------------------------------------------------------
 echo "Building wheel from sdk/ ..."
 rm -rf "${REPO_ROOT}/sdk/dist-wheels"
@@ -73,7 +68,19 @@ cp "${REPO_ROOT}/bundle/SDK_REFERENCE.md" "$DEST/SDK_REFERENCE.md"
 # ---- zip ------------------------------------------------------------------
 ARCHIVE="$REPO_ROOT/${DIST_NAME}.zip"
 rm -f "$ARCHIVE"
-( cd "$STAGING_DIR" && zip -qr "$ARCHIVE" "$DIST_NAME" )
+python3 - "$STAGING_DIR" "$DIST_NAME" "$ARCHIVE" <<'PY'
+import pathlib
+import sys
+import zipfile
+
+staging = pathlib.Path(sys.argv[1])
+dist_name = sys.argv[2]
+archive = pathlib.Path(sys.argv[3])
+with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as out:
+    for path in sorted((staging / dist_name).rglob("*")):
+        if path.is_file():
+            out.write(path, path.relative_to(staging))
+PY
 rm -rf "$STAGING_DIR"
 
 # ---- post-flight assertions ----------------------------------------------
@@ -109,10 +116,10 @@ echo "wheels-only assertion: PASSED"
 
 # Must NOT leak internal repo names or maintainer markers into the archive.
 if unzip -p "$ARCHIVE" 2>/dev/null | strings | grep -qiE \
-  'gdx-python-sdk|UPSTREAM_REF|refresh_sdk|package\.sh|\bvendored\b'; then
+  'gdx-python-sdk|UPSTREAM_REF|refresh_sdk|package\.sh|vendored'; then
   echo "error: bundle contains internal repo references or maintainer markers" >&2
   unzip -p "$ARCHIVE" 2>/dev/null | strings | grep -iE \
-    'gdx-python-sdk|UPSTREAM_REF|refresh_sdk|package\.sh|\bvendored\b' | head -20 >&2 || true
+    'gdx-python-sdk|UPSTREAM_REF|refresh_sdk|package\.sh|vendored' | head -20 >&2 || true
   exit 1
 fi
 

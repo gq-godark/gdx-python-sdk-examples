@@ -1146,9 +1146,7 @@ def parse_funding_rate_snapshot_json(msg: dict) -> list[FundingRateUpdate]:
     return out
 
 
-def parse_sequencer_to_edge_message(
-    data: bytes, message_type: str | None = None
-) -> SequencerPush:
+def parse_sequencer_to_edge_message(data: bytes, message_type: str | None = None) -> SequencerPush:
     """Decode bare HPKE push plaintext using the cleartext ``message_type``.
 
     Devnet seals the inner sequencer message selected by ``ResponseHeader.message_type``

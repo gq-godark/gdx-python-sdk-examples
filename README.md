@@ -70,25 +70,23 @@ Fund the default user: `gdx fund 00000000-0000-4000-8000-000000000001`. Copy `VI
 
 ## Install
 
-### From a packaged tarball (recommended for MMs)
+### From a packaged zip (recommended for MMs)
 
-Unpack the archive you received. It contains `wheels/godark-*.whl`, vendored `sdk/`, `examples/`, and `scripts/setup_venv.sh`.
+Unpack the archive you received. It contains `wheels/godark-*.whl`,
+`examples/`, `README.md`, `SDK_REFERENCE.md`, and `.env.example`.
 
 ```bash
-bash scripts/setup_venv.sh
+python3 -m venv .venv
 source .venv/bin/activate
+pip install --upgrade pip
+pip install wheels/godark-*.whl
 cd examples && python quickstart.py
 python full_trader_example.py
 python rest_client_example.py
 ```
 
-`setup_venv.sh` **prefers installing the packaged wheel** under `wheels/` (immutable SDK snapshot). Dependencies such as `cryptography` are pulled from PyPI using the wheel’s metadata.
-
-To force install from the vendored source tree instead (debugging):
-
-```bash
-PREFER_SDK_SOURCE=1 bash scripts/setup_venv.sh
-```
+Dependencies such as `cryptography` are pulled from PyPI using the wheel’s
+metadata.
 
 ### From a git clone (development)
 
@@ -119,22 +117,21 @@ Order-type support in this MM distribution is limited to **`MARKET`** and **`LIM
 
 ## Packaging for market makers
 
-Create a clean distributable archive:
+Create a clean wheels-only distributable archive:
 
 ```bash
-bash scripts/package.sh              # godark-python-examples.tar.gz
+bash scripts/package.sh              # godark-python-sdk.zip
 bash scripts/package.sh my-release   # custom archive name stem
 ```
 
-The tarball includes:
+The zip includes:
 
-- `sdk/` — vendored package sources (including generated protobuf under `godark/_generated/`)
 - `wheels/` — `godark-*.whl` built from `sdk/` (`pip wheel --no-deps`; runtime deps install via pip when the wheel is installed)
 - `examples/` — MM example scripts
-- `scripts/setup_venv.sh` — bootstrap script for recipients
 - `README.md`, `SDK_REFERENCE.md`, `.env.example`
 
-Internal-only paths (`scripts/package.sh`, `scripts/refresh_sdk.sh`, `.git/`, local `.env`, virtualenvs, build artifacts) are **not** included.
+Internal-only paths (`sdk/`, `scripts/`, `.git/`, local `.env`, virtualenvs,
+build artifacts) are **not** included.
 
 ## Layout
 

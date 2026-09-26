@@ -24,6 +24,7 @@ async def main():
     async with GodarkClient(
         api_key_id=os.environ["GODARK_API_KEY_ID"],
         api_secret=os.environ["GODARK_API_SECRET"],
+        passphrase=os.environ["GODARK_PASSPHRASE"],
         base_url=os.environ.get("GODARK_EDGE_URL", "wss://api.godark-dex.com"),
     ) as client:
         ack = await client.place_order(
@@ -74,6 +75,7 @@ helper loads it from the repo root; OS environment variables win over `.env` val
 `GodarkClient.__init__` keyword arguments:
 
 - `api_key_id`, `api_secret` — required pair (or single `api_key="<id>:<secret>"` token).
+- `passphrase` — required API-key passphrase.
 - `base_url` — host-only WebSocket origin; SDK appends `/ws/v1`. Falls back to `GODARK_EDGE_URL` / `GDX_EDGE_URL` then production.
 - `user_uuid` — fallback used when the edge auth response omits a user id; falls back to `GODARK_USER_UUID` / `GDX_USER_UUID`.
 - `hpke_static_public_key_hex` — pinned sequencer HPKE static key (64 hex); defaults to `GDX_HPKE_STATIC_PUBLIC_KEY` and aliases.
@@ -86,7 +88,7 @@ helper loads it from the repo root; OS environment variables win over `.env` val
 
 | Method | Signature | Purpose |
 |--------|-----------|---------|
-| `place_order` | `async def place_order(symbol, side, order_type, quantity, price=None, time_in_force="GTC", aon=False, min_fill_size=None, expiry_time=None) -> OrderAck` | Place encrypted order; raises `OrderError` on rejection |
+| `place_order` | `async def place_order(symbol, side, order_type, quantity, price=None, time_in_force="GTC", aon=False, min_fill_size=None, expiry_time=None, confirmation="book", options=None) -> OrderAck` | Place encrypted order; raises `OrderError` on rejection |
 | `update_leverage` | `async def update_leverage(symbol: str, leverage: int) -> OrderAck` | Set per-symbol account leverage (place/mass_quote inherit this) |
 | `cancel_order` | `async def cancel_order(order_id: str, symbol: str = "BTC-USDC-PERP") -> OrderAck` | Cancel by numeric id (passed as string) |
 | `modify_order` | `async def modify_order(order_id: str, symbol="BTC-USDC-PERP", new_price=None, new_quantity=None, new_trigger_price=None) -> OrderAck` | Amend price, quantity, and/or stop trigger |
@@ -327,7 +329,7 @@ Force install from the vendored sources (debugging) with
 To use `godark` from your own project, install the wheel directly:
 
 ```bash
-pip install /path/to/wheels/godark-0.1.0-py3-none-any.whl
+pip install /path/to/wheels/godark-0.2.0-py3-none-any.whl
 ```
 
 ```python
