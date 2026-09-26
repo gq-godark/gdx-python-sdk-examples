@@ -181,11 +181,11 @@ def _resolve_hpke_static_public_key_hex(
     return environment.hpke_static_public_key_hex
 
 
-def _resolve_user_uuid(explicit: str | None) -> str | None:
-    """Resolve user_uuid: constructor arg wins, then env vars."""
+def _resolve_account(explicit: str | None) -> str | None:
+    """Resolve account: constructor arg wins, then env vars."""
     if explicit is not None and str(explicit).strip() != "":
         return str(explicit).strip()
-    for key in ("GODARK_USER_UUID", "GDX_USER_UUID"):
+    for key in ("GODARK_ACCOUNT", "GDX_ACCOUNT", "GODARK_USER_UUID", "GDX_USER_UUID"):
         v = os.environ.get(key, "").strip()
         if v:
             return v
@@ -256,8 +256,8 @@ class GodarkClient:
             ``wss://api.godark-dex.com``). The client appends ``/ws/v1`` to
             produce the final upgrade URL. Preference: arg →
             ``GODARK_EDGE_URL`` / ``GDX_EDGE_URL`` → ``environment`` preset.
-        user_uuid: Fallback user UUID when the edge auth response omits it
-            (e.g. local edge). Also reads ``GODARK_USER_UUID`` / ``GDX_USER_UUID``.
+        account: Fallback base58 32-byte account when the edge auth response omits it
+            (e.g. local edge). Also reads ``GODARK_ACCOUNT`` / ``GDX_ACCOUNT``.
         auto_reconnect: Automatically reconnect on disconnect.
         symbol_map: Custom symbol-name-to-id mapping.
         transport: Low-level transport config (TLS, timeouts, etc.).
@@ -277,11 +277,11 @@ class GodarkClient:
         ) as client:
             ...
 
-        # Local edge (no user_uuid in auth response):
+        # Local edge (no account in auth response):
         async with GodarkClient(
             api_key="test-key-1",
             environment=Environment.LOCALNET,
-            user_uuid="00000000-0000-4000-8000-000000000001",
+            account="11111111111111111111111111111111",
             hpke_static_public_key_hex="…",  # required on localnet
         ) as client:
             ack = await client.place_order(
@@ -300,13 +300,14 @@ class GodarkClient:
         passphrase: str | None = None,
         environment: Environment = Environment.TESTNET,
         base_url: str | None = None,
-        user_uuid: str | None = None,
+        account: str | None = None,
         auto_reconnect: bool = True,
         symbol_map: dict[str, int] | None = None,
         transport: TransportConfig | None = None,
         stream_buffer_size: int = 256,
         place_order_terminal_timeout: float | None = None,
         hpke_static_public_key_hex: str | None = None,
+        user_uuid: str | None = None,
     ):
         if api_key_id is not None or api_secret is not None:
             if api_key_id is None or api_secret is None:
@@ -329,7 +330,9 @@ class GodarkClient:
 
         self._environment = environment
         self._base_url = _resolve_edge_base_url(base_url, environment.edge_base_url)
-        self._config_user_uuid = _resolve_user_uuid(user_uuid)
+        if account is not None and user_uuid is not None:
+            raise ValueError("use account, not both account and deprecated user_uuid")
+        self._config_account = _resolve_account(account if account is not None else user_uuid)
         self._auto_reconnect = auto_reconnect
         self._user_symbol_map = symbol_map is not None
         self._symbol_map = dict(symbol_map) if symbol_map is not None else load_offline_symbol_map()
@@ -358,7 +361,7 @@ class GodarkClient:
         self._transport = EdgeTransport(_ws_url(self._base_url), self._transport_config)
         self._session = CryptoSession()
         self._conn_id = 0
-        self._user_uuid: str | None = None
+        self._account: str | None = None
         self._account_id: str | None = None
         self._login_session_id: str | None = None
         self._token_expires_at: str | None = None
@@ -422,9 +425,14 @@ class GodarkClient:
         self._intentional_close = False
 
     @property
+    def account(self) -> str | None:
+        """Canonical base58 account from the edge after successful auth."""
+        return self._account
+
+    @property
     def user_uuid(self) -> str | None:
-        """User UUID from the edge after successful auth."""
-        return self._user_uuid
+        """Deprecated compatibility alias for :attr:`account`."""
+        return self._account
 
     @property
     def account_id(self) -> str | None:
@@ -473,17 +481,20 @@ class GodarkClient:
             await self._transport.disconnect()
             raise AuthenticationError(auth_result.get("error", "authentication failed"))
 
-        uid = auth_result.get("user_uuid") or auth_result.get("user_id")
-        if uid is None:
-            uid = self._config_user_uuid
-        if uid is None:
+        account = auth_result.get("account") or self._config_account
+        if account is None:
             await self._transport.disconnect()
             raise AuthenticationError(
-                "authentication succeeded but user_uuid missing in auth_result "
+                "authentication succeeded but account missing in auth_result "
                 "and no fallback provided via constructor or "
-                "GODARK_USER_UUID / GDX_USER_UUID env vars"
+                "GODARK_ACCOUNT / GDX_ACCOUNT env vars"
             )
-        self._user_uuid = str(uid)
+        self._account = str(account)
+        try:
+            _identity.account_to_bytes(self._account)
+        except ValueError as exc:
+            await self._transport.disconnect()
+            raise AuthenticationError(f"invalid account in auth_result: {exc}") from exc
         self._account_id = (
             str(auth_result["account_id"]) if auth_result.get("account_id") is not None else None
         )
@@ -552,7 +563,7 @@ class GodarkClient:
         symbol: str,
         side: str | Side,
         order_type: str | OrderType,
-        quantity: float,
+        quantity: float | None = None,
         price: float | None = None,
         time_in_force: str | TimeInForce = "GTC",
         aon: bool = False,
@@ -581,7 +592,7 @@ class GodarkClient:
             side=side_str,
             order_type=otype_str,
             quantity=quantity,
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             price=price,
             time_in_force=tif_str,
             aon=aon,
@@ -614,7 +625,7 @@ class GodarkClient:
 
         plaintext = _proto.build_cancel_order_proto(
             order_id=int(order_id),
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             symbol_id=symbol_id,
             correlation_id_bytes=corr_id,
         )
@@ -636,7 +647,7 @@ class GodarkClient:
 
         plaintext = _proto.build_modify_order_proto(
             order_id=int(order_id),
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             symbol_id=symbol_id,
             new_price=new_price,
             new_quantity=new_quantity,
@@ -656,7 +667,7 @@ class GodarkClient:
         symbol_id = self._resolve_symbol(symbol)
         corr_id = _new_correlation_id()
         plaintext = _proto.build_update_leverage_proto(
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             symbol_id=symbol_id,
             leverage=leverage,
             correlation_id_bytes=corr_id,
@@ -678,7 +689,7 @@ class GodarkClient:
         corr_id = _new_correlation_id()
         plaintext = _proto.build_cancel_all_proto(
             body_symbol_id,
-            self._user_uuid_bytes(),
+            self._account_bytes(),
             corr_id,
         )
         response = await self._send_encrypted_command(
@@ -694,7 +705,7 @@ class GodarkClient:
         corr_id = _new_correlation_id()
         plaintext = _proto.build_close_all_proto(
             body_symbol_id,
-            self._user_uuid_bytes(),
+            self._account_bytes(),
             corr_id,
         )
         response = await self._send_encrypted_command(
@@ -709,7 +720,7 @@ class GodarkClient:
         corr_id = _new_correlation_id()
         plaintext = _proto.build_reverse_proto(
             symbol_id,
-            self._user_uuid_bytes(),
+            self._account_bytes(),
             corr_id,
         )
         response = await self._send_encrypted_command(
@@ -735,7 +746,7 @@ class GodarkClient:
         corr_id = _new_correlation_id()
         body_symbol_id = symbol_id if oid == 0 else None
         plaintext = _proto.build_amend_tpsl_proto(
-            self._user_uuid_bytes(),
+            self._account_bytes(),
             oid,
             corr_id,
             take_profit_price=take_profit_price,
@@ -764,7 +775,7 @@ class GodarkClient:
         corr_id = _new_correlation_id()
         body_symbol_id = symbol_id if oid == 0 else None
         plaintext = _proto.build_cancel_tpsl_proto(
-            self._user_uuid_bytes(),
+            self._account_bytes(),
             oid,
             corr_id,
             symbol_id=body_symbol_id,
@@ -805,7 +816,7 @@ class GodarkClient:
 
         plaintext = _proto.build_mass_quote_proto(
             symbol_id=symbol_id,
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             legs=legs,
             correlation_id_bytes=corr_id,
             leverage=leverage,
@@ -836,7 +847,7 @@ class GodarkClient:
 
         plaintext = _proto.build_batch_cancel_proto(
             symbol_id=symbol_id,
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             order_ids=order_ids,
             correlation_id_bytes=corr_id,
         )
@@ -867,7 +878,7 @@ class GodarkClient:
 
         plaintext = _proto.build_batch_modify_proto(
             symbol_id=symbol_id,
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             legs=legs,
             correlation_id_bytes=corr_id,
         )
@@ -1025,21 +1036,21 @@ class GodarkClient:
 
     async def _setup_hpke_session(self) -> None:
         """Complete HPKE Base setup over the active WebSocket."""
-        if self._user_uuid is None or self._conn_id == 0:
-            raise SessionError("user_uuid and conn_id required before HPKE setup")
+        if self._account is None or self._conn_id == 0:
+            raise SessionError("account and conn_id required before HPKE setup")
         try:
             remote_static = pinned_sequencer_static_pub(self._hpke_static_public_key_hex)
         except ValueError as exc:
             raise SessionError(str(exc)) from exc
         try:
-            user = uuid.UUID(self._user_uuid)
-            encapped = self._session.setup(remote_static, user, self._conn_id)
+            account = self._account_bytes()
+            encapped = self._session.setup(remote_static, account, self._conn_id)
         except Exception as exc:
             raise SessionError(f"HPKE setup failed: {exc}") from exc
         from ._wire import encode_hpke_setup
 
         try:
-            frame = encode_hpke_setup(user.bytes, self._conn_id, encapped)
+            frame = encode_hpke_setup(account, self._conn_id, encapped)
             reply = await self._transport.send_hpke_setup(frame)
             if reply.get("established") is not True:
                 raise SessionError("HPKE setup not established")
@@ -1106,7 +1117,7 @@ class GodarkClient:
         def _prepare() -> bytes:
             nonce_counter = self._session.next_nonce
             aad = _proto.build_order_header_aad(
-                user_uuid=self._user_uuid_bytes(),
+                account=self._account_bytes(),
                 symbol_id=symbol_id,
                 request_type_str=request_type,
                 nonce=nonce_counter,
@@ -1120,7 +1131,7 @@ class GodarkClient:
                 raise EncryptionError(f"Failed to encrypt order: {e}") from e
 
             header = build_order_header_proto(
-                user_uuid=self._user_uuid_bytes(),
+                account=self._account_bytes(),
                 symbol_id=symbol_id,
                 request_type_str=request_type,
                 nonce=actual_nonce,
@@ -1385,7 +1396,7 @@ class GodarkClient:
         ct = base64.b64decode(msg.get("encrypted_body", ""))
         nonce = int(msg.get("nonce", 0))
         aad = _proto.build_response_header_aad(
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             message_type_str=msg.get("message_type", default_message_type),
             body_length=len(ct),
             nonce=nonce,
@@ -1696,30 +1707,30 @@ class GodarkClient:
     def _ensure_ready(self) -> None:
         if not self._connected:
             raise ConnectionError("Not connected")
-        if self._user_uuid is None:
+        if self._account is None:
             raise ConnectionError("Not authenticated")
         if not self._session.is_established:
             raise SessionError("HPKE session not established")
 
     @staticmethod
-    def _parse_user_uuid_bytes(msg: dict) -> bytes:
-        """Extract user UUID bytes from a push JSON message."""
-        raw = msg.get("user_uuid") or msg.get("user_id")
+    def _parse_account_bytes(msg: dict) -> bytes:
+        """Extract account bytes from a push JSON message."""
+        raw = msg.get("account")
         if isinstance(raw, str):
             try:
-                return _identity.uuid_to_bytes(raw)
+                return _identity.account_to_bytes(raw)
             except ValueError:
                 pass
-        return b"\x00" * _identity.USER_UUID_LEN
+        return b"\x00" * _identity.ACCOUNT_LEN
 
-    def _user_uuid_bytes(self) -> bytes:
-        """Return current user UUID as 16 raw bytes for protobuf fields."""
-        if self._user_uuid is None:
-            return b"\x00" * _identity.USER_UUID_LEN
+    def _account_bytes(self) -> bytes:
+        """Return current account as 32 wire bytes."""
+        if self._account is None:
+            return b"\x00" * _identity.ACCOUNT_LEN
         try:
-            return _identity.uuid_to_bytes(self._user_uuid)
+            return _identity.account_to_bytes(self._account)
         except (ValueError, AttributeError):
-            return b"\x00" * _identity.USER_UUID_LEN
+            return b"\x00" * _identity.ACCOUNT_LEN
 
     def _resolve_symbol(self, symbol: str) -> int:
         sid = self._symbol_map.get(symbol)

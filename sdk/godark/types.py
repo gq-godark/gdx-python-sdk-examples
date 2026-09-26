@@ -108,12 +108,13 @@ class PlaceOrderOptions:
     take_profit_price: float | None = None
     stop_loss_price: float | None = None
     slippage_bps: int | None = None
+    quote_notional: float | None = None
 
 
 @dataclass(frozen=True)
 class OrderUpdate:
     order_id: str
-    user_uuid: str
+    account: str
     symbol_id: int
     side: Side
     status: OrderStatus
@@ -135,10 +136,15 @@ class OrderUpdate:
     #: Realized PnL on closing / terminal fills; omitted when absent on wire.
     realized_pnl: str | None = None
 
+    @property
+    def user_uuid(self) -> str:
+        """Deprecated compatibility alias for :attr:`account`."""
+        return self.account
+
 
 @dataclass(frozen=True)
 class PositionUpdate:
-    user_uuid: str
+    account: str
     symbol_id: int
     side: Side
     update_type: PositionUpdateType
@@ -173,7 +179,7 @@ class PositionRow:
 
 @dataclass(frozen=True)
 class PositionsSnapshot:
-    user_uuid: str
+    account: str
     rows: tuple[PositionRow, ...]
     server_timestamp: int
     source: PositionsSnapshotSource
@@ -195,7 +201,7 @@ class SystemHealthUpdate:
 
 @dataclass(frozen=True)
 class BalanceUpdate:
-    user_uuid: str
+    account: str
     balance_raw: int
     timestamp: int
     balance: str = ""
@@ -230,9 +236,9 @@ class AccountMarginSummary:
 class AccountMarginUpdate:
     """Encrypted account-margin snapshot / push."""
 
-    user_uuid: str
+    account: str
     server_timestamp: int
-    account: AccountMarginSummary | None = None
+    summary: AccountMarginSummary | None = None
 
 
 @dataclass(frozen=True)
@@ -292,11 +298,11 @@ class LeverageSettings:
     """Per-user leverage prefs from REST ``GET /leverage`` or encrypted WS push.
 
     WS pushes (positions subscribe / after ``update_leverage``) also carry
-    ``user_uuid`` and ``server_timestamp``; REST snapshots leave those at defaults.
+    ``account`` and ``server_timestamp``; REST snapshots leave those at defaults.
     """
 
     settings: tuple[LeverageSetting, ...]
-    user_uuid: str = ""
+    account: str = ""
     server_timestamp: int = 0
 
 

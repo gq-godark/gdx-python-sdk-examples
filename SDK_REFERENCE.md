@@ -49,7 +49,7 @@ The MM examples expect:
 - `GODARK_API_KEY_ID` (required)
 - `GODARK_API_SECRET` (required)
 - `GODARK_EDGE_URL` (optional, defaults to `wss://api.godark-dex.com`)
-- `GODARK_USER_UUID` (optional fallback when the auth response omits a user id; some local edges need this)
+- `GODARK_ACCOUNT` (optional base58 32-byte fallback when auth omits `account`)
 
 Use `.env.example` as the template for your local `.env`. The `examples/dotenv.py`
 helper loads it from the repo root; OS environment variables win over `.env` values.
@@ -66,7 +66,7 @@ helper loads it from the repo root; OS environment variables win over `.env` val
 | `disconnect` | `async def disconnect() -> None` | Graceful disconnect; cancels pending reconnect tasks |
 | `logout` | `async def logout() -> None` | Send docs `op: logout` when supported, then disconnect |
 | `__aenter__` / `__aexit__` | `async with GodarkClient(...) as c:` | Async-context wrapper around `connect()` / `disconnect()` |
-| `user_uuid` | `@property -> str \| None` | Authenticated user id (set after `connect`) |
+| `account` | `@property -> str \| None` | Authenticated base58 account (set after `connect`) |
 | `account_id` | `@property -> str \| None` | Docs `op: login` account identifier when supplied by the edge |
 | `login_session_id` | `@property -> str \| None` | Docs `op: login` session identifier when supplied by the edge |
 | `token_expires_at` | `@property -> str \| None` | Docs `op: login` token expiry timestamp when supplied by the edge |
@@ -77,7 +77,7 @@ helper loads it from the repo root; OS environment variables win over `.env` val
 - `api_key_id`, `api_secret` — required pair (or single `api_key="<id>:<secret>"` token).
 - `passphrase` — required API-key passphrase.
 - `base_url` — host-only WebSocket origin; SDK appends `/ws/v1`. Falls back to `GODARK_EDGE_URL` / `GDX_EDGE_URL` then production.
-- `user_uuid` — fallback used when the edge auth response omits a user id; falls back to `GODARK_USER_UUID` / `GDX_USER_UUID`.
+- `account` — fallback used when auth omits the account; falls back to `GODARK_ACCOUNT` / `GDX_ACCOUNT`.
 - `hpke_static_public_key_hex` — pinned sequencer HPKE static key (64 hex); defaults to `GDX_HPKE_STATIC_PUBLIC_KEY` and aliases.
 - `auto_reconnect=True` — automatically reconnect after transport drops.
 - `symbol_map=None` — override the default symbol-name → numeric-id table.
@@ -88,7 +88,7 @@ helper loads it from the repo root; OS environment variables win over `.env` val
 
 | Method | Signature | Purpose |
 |--------|-----------|---------|
-| `place_order` | `async def place_order(symbol, side, order_type, quantity, price=None, time_in_force="GTC", aon=False, min_fill_size=None, expiry_time=None, confirmation="book", options=None) -> OrderAck` | Place encrypted order; raises `OrderError` on rejection |
+| `place_order` | `async def place_order(symbol, side, order_type, quantity=None, price=None, time_in_force="GTC", aon=False, min_fill_size=None, expiry_time=None, confirmation="book", options=None) -> OrderAck` | Place encrypted order; raises `OrderError` on rejection |
 | `update_leverage` | `async def update_leverage(symbol: str, leverage: int) -> OrderAck` | Set per-symbol account leverage (place/mass_quote inherit this) |
 | `cancel_order` | `async def cancel_order(order_id: str, symbol: str = "BTC-USDC-PERP") -> OrderAck` | Cancel by numeric id (passed as string) |
 | `modify_order` | `async def modify_order(order_id: str, symbol="BTC-USDC-PERP", new_price=None, new_quantity=None, new_trigger_price=None) -> OrderAck` | Amend price, quantity, and/or stop trigger |
@@ -214,7 +214,7 @@ strings to preserve sequencer-side decimal precision.
 ### OrderUpdate
 
 Lifecycle event for one order. Fields:
-`order_id`, `user_uuid`, `symbol_id` (int), `side` (`Side`), `status`
+`order_id`, `account`, `symbol_id` (int), `side` (`Side`), `status`
 (`OrderStatus`), `update_type` (`OrderUpdateType`), `price`, `quantity`,
 `filled_qty`, `remaining_qty`, `cum_fill`, `cancel_reason`
 (`CancelReason | None`), `reject_reason` (`str | None`), `correlation_id`,
@@ -226,7 +226,7 @@ sequencer includes them.
 ### PositionUpdate
 
 Position lifecycle event. Fields:
-`user_uuid`, `symbol_id` (int), `side` (`Side`), `update_type`
+`account`, `symbol_id` (int), `side` (`Side`), `update_type`
 (`PositionUpdateType`), `size`, `entry_price`, `previous_size`, `fill_price`,
 `fill_qty`, `correlation_id`, `timestamp`.
 
@@ -239,7 +239,7 @@ Decrease / Close / Snapshot transitions.
 `PositionRow`: `symbol_id`, `side`, `size`, `entry_price`, `leverage`,
 `mark_price`, `unrealized_pnl`, `notional`, `mark_publish_time_sec`.
 
-`PositionsSnapshot`: `user_uuid`, `rows: tuple[PositionRow, …]`,
+`PositionsSnapshot`: `account`, `rows: tuple[PositionRow, …]`,
 `server_timestamp`, `source` (`PositionsSnapshotSource`), `correlation_id`.
 
 ### Other push payloads
@@ -270,7 +270,7 @@ name (e.g. `Side.SELL == "SELL"`, `str(OrderType.LIMIT) == "OrderType.LIMIT"`,
 - `PositionsSnapshotSource`: `UNSPECIFIED`, `INITIAL`, `PERIODIC`, `EVENT`
 - `SettlementBatchStatus`: `UNSPECIFIED`, `SUBMITTED`, `CONFIRMED`, `FAILED`
 
-`PlaceOrderOptions` (`options` on `place_order`) includes `reduce_only`, `post_only`, `stp_mode`, `peg_offset_bps`, `trigger_price`, `take_profit_price`, `stop_loss_price`, and `slippage_bps`. Omit `slippage_bps` to use the venue max walk cap (localnet 5%); typical explicit values are 50–500 bps (0.5%–5%). `PEG` pegs to the Pyth oracle mark.
+`PlaceOrderOptions` (`options` on `place_order`) includes `reduce_only`, `post_only`, `stp_mode`, `peg_offset_bps`, `trigger_price`, `take_profit_price`, `stop_loss_price`, `slippage_bps`, and `quote_notional`. Omit `slippage_bps` to use the venue max walk cap (localnet 5%); typical explicit values are 50–500 bps (0.5%–5%). Use `quote_notional` instead of `quantity` for quote-sized orders; exactly one size intent is required. `PEG` pegs to the Pyth oracle mark.
 
 ## Errors
 

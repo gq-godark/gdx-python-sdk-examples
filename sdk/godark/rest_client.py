@@ -11,8 +11,9 @@ import uuid
 from typing import Any, Literal
 
 from . import _proto
-from ._access_token import user_uuid_from_access_token_jwt
+from ._access_token import account_from_access_token_jwt
 from ._hpke import SealedSession, nonce_from_u64, pinned_sequencer_static_pub
+from ._identity import account_to_bytes
 from ._rest_transport import RestEnvelopeError, RestTransport
 from ._session import CryptoSession
 from ._symbols import load_offline_symbol_map, load_symbol_map_from_edge
@@ -90,8 +91,8 @@ def _timestamp_ns() -> int:
     return int(time.time() * 1_000_000_000)
 
 
-def _env_user_uuid() -> str | None:
-    for key in ("GODARK_USER_UUID", "GDX_USER_UUID"):
+def _env_account() -> str | None:
+    for key in ("GODARK_ACCOUNT", "GDX_ACCOUNT", "GODARK_USER_UUID", "GDX_USER_UUID"):
         value = os.environ.get(key, "").strip()
         if value:
             return value
@@ -122,10 +123,11 @@ class GodarkRestClient:
         api_secret: str | None = None,
         passphrase: str | None = None,
         rest_base_url: str | None = None,
-        user_uuid: str | None = None,
+        account: str | None = None,
         hpke_static_public_key_hex: str | None = None,
         environment: Environment | None = None,
         symbol_map: dict[str, int] | None = None,
+        user_uuid: str | None = None,
     ):
         if api_key_id is not None or api_secret is not None:
             if api_key_id is None or api_secret is None:
@@ -154,7 +156,9 @@ class GodarkRestClient:
         self._symbol_map = dict(symbol_map) if symbol_map is not None else load_offline_symbol_map()
         self._http = RestTransport(self._rest_base)
         self._bearer: str | None = None
-        self._user_uuid = user_uuid or _env_user_uuid()
+        if account is not None and user_uuid is not None:
+            raise ValueError("use account, not both account and deprecated user_uuid")
+        self._account = account or user_uuid or _env_account()
         self._token_scope: str | None = None
         env = (
             environment
@@ -178,13 +182,18 @@ class GodarkRestClient:
         return self._token_scope
 
     @property
-    def user_uuid_str(self) -> str | None:
-        return self._user_uuid
+    def account_str(self) -> str | None:
+        return self._account
+
+    @property
+    def account(self) -> str | None:
+        """Alias for ``account_str`` (WS client parity)."""
+        return self._account
 
     @property
     def user_uuid(self) -> str | None:
-        """Alias for ``user_uuid_str`` (WS client parity)."""
-        return self._user_uuid
+        """Deprecated compatibility alias for :attr:`account`."""
+        return self._account
 
     def _resolve_symbol(self, symbol: str) -> int:
         sid = self._symbol_map.get(symbol)
@@ -192,10 +201,10 @@ class GodarkRestClient:
             raise ValueError(f"unknown symbol: {symbol}")
         return sid
 
-    def _user_uuid_bytes(self) -> bytes:
-        if self._user_uuid is None:
+    def _account_bytes(self) -> bytes:
+        if self._account is None:
             raise SessionError("Not authenticated")
-        return uuid.UUID(self._user_uuid).bytes
+        return account_to_bytes(self._account)
 
     async def connect(self) -> None:
         if not self._user_symbol_map:
@@ -214,20 +223,24 @@ class GodarkRestClient:
             raise SessionError("auth/token missing access_token/token")
         self._token_scope = auth_data.get("scope")
         resolved: str | None = None
-        legacy_uuid = auth_data.get("user_uuid")
-        if isinstance(legacy_uuid, str) and legacy_uuid.strip():
-            resolved = legacy_uuid.strip()
+        account = auth_data.get("account")
+        if isinstance(account, str) and account.strip():
+            resolved = account.strip()
         if not resolved:
-            parsed = user_uuid_from_access_token_jwt(self._bearer)
+            parsed = account_from_access_token_jwt(self._bearer)
             if parsed is not None:
                 resolved = str(parsed)
-        if not resolved and self._user_uuid:
-            resolved = self._user_uuid
+        if not resolved and self._account:
+            resolved = self._account
         if not resolved:
             raise SessionError(
-                "REST auth succeeded but user identity missing; JWT sub and fallback UUID both absent"
+                "REST auth succeeded but account missing; JWT sub and fallback account both absent"
             )
-        self._user_uuid = resolved
+        self._account = resolved
+        try:
+            account_to_bytes(resolved)
+        except ValueError as exc:
+            raise SessionError(f"REST auth returned invalid account: {exc}") from exc
 
     async def disconnect(self) -> None:
         try:
@@ -235,7 +248,7 @@ class GodarkRestClient:
                 await self._http.revoke_token(bearer=self._bearer)
         finally:
             self._bearer = None
-            self._user_uuid = None
+            self._account = None
             self._token_scope = None
             await self._http.aclose()
 
@@ -262,15 +275,15 @@ class GodarkRestClient:
         if not self._bearer:
             raise SessionError("not authenticated – call connect() first")
         recipient = pinned_sequencer_static_pub(self._hpke_pin_hex)
-        user = uuid.UUID(self._user_uuid)
+        account = self._account_bytes()
         request_id = self._next_request_id
         self._next_request_id += 1
-        encapped, sealed = CryptoSession.setup_rest(recipient, user, request_id)
+        encapped, sealed = CryptoSession.setup_rest(recipient, account, request_id)
 
         nonce = 0
         body_length = len(plaintext) + _GCM_TAG_LEN
         aad = _proto.build_order_header_aad(
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             symbol_id=symbol_id,
             request_type_str=request_type,
             nonce=nonce,
@@ -386,7 +399,7 @@ class GodarkRestClient:
         message_type = str(msg.get("message_type", "ack"))
         fencing_epoch = int(msg.get("fencing_epoch", 0))
         aad = _proto.build_response_header_aad(
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             message_type_str=message_type,
             body_length=len(ct),
             nonce=nonce,
@@ -424,7 +437,7 @@ class GodarkRestClient:
         message_type = str(msg.get("message_type", "ack"))
         fencing_epoch = int(msg.get("fencing_epoch", 0))
         aad = _proto.build_response_header_aad(
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             message_type_str=message_type,
             body_length=len(ct),
             nonce=nonce,
@@ -445,21 +458,21 @@ class GodarkRestClient:
         path: str,
     ) -> tuple[str, Any]:
         corr_id = _new_correlation_id()
-        plaintext = build_proto(self._user_uuid_bytes(), corr_id)
+        plaintext = build_proto(self._account_bytes(), corr_id)
         header_symbol_id = self._symbol_map.get("BTC-USDC-PERP")
         if header_symbol_id is None:
             header_symbol_id = next(iter(self._symbol_map.values()), 1)
         if not self._bearer:
             raise SessionError("not authenticated – call connect() first")
         recipient = pinned_sequencer_static_pub(self._hpke_pin_hex)
-        user = uuid.UUID(self._user_uuid)
+        account = self._account_bytes()
         request_id = self._next_request_id
         self._next_request_id += 1
-        encapped, sealed = CryptoSession.setup_rest(recipient, user, request_id)
+        encapped, sealed = CryptoSession.setup_rest(recipient, account, request_id)
         nonce = 0
         body_length = len(plaintext) + _GCM_TAG_LEN
         aad = _proto.build_order_header_aad(
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             symbol_id=header_symbol_id,
             request_type_str=request_type,
             nonce=nonce,
@@ -549,7 +562,7 @@ class GodarkRestClient:
             side=side_str,
             order_type=otype_str,
             quantity=quantity,
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             price=price,
             time_in_force=tif_str,
             aon=aon,
@@ -597,7 +610,7 @@ class GodarkRestClient:
         corr_id = _new_correlation_id()
         plaintext = _proto.build_cancel_order_proto(
             order_id=int(order_id),
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             symbol_id=symbol_id,
             correlation_id_bytes=corr_id,
         )
@@ -653,7 +666,7 @@ class GodarkRestClient:
         corr_id = _new_correlation_id()
         plaintext = _proto.build_modify_order_proto(
             order_id=int(order_id),
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             symbol_id=symbol_id,
             new_price=new_price,
             new_quantity=new_quantity,
@@ -717,7 +730,7 @@ class GodarkRestClient:
         lev = max(1, int(leverage))
         corr_id = _new_correlation_id()
         plaintext = _proto.build_update_leverage_proto(
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             symbol_id=symbol_id,
             leverage=lev,
             correlation_id_bytes=corr_id,
@@ -744,7 +757,7 @@ class GodarkRestClient:
         corr_id = _new_correlation_id()
         plaintext = _proto.build_mass_quote_proto(
             symbol_id=symbol_id,
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             legs=legs,
             correlation_id_bytes=corr_id,
             leverage=leverage,
@@ -766,7 +779,7 @@ class GodarkRestClient:
         corr_id = _new_correlation_id()
         plaintext = _proto.build_batch_cancel_proto(
             symbol_id=symbol_id,
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             order_ids=order_ids,
             correlation_id_bytes=corr_id,
         )
@@ -785,7 +798,7 @@ class GodarkRestClient:
         corr_id = _new_correlation_id()
         plaintext = _proto.build_batch_modify_proto(
             symbol_id=symbol_id,
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             legs=legs,
             correlation_id_bytes=corr_id,
         )

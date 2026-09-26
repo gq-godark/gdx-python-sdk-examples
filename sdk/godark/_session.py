@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
-
 from ._hpke import TAG_LEN, SealedSession, nonce_from_u64, setup_session
 
 
@@ -31,7 +29,7 @@ class CryptoSession:
         """Peek at the next send nonce counter without advancing it."""
         return self._send_counter
 
-    def setup(self, recipient_public: bytes, user_uuid: uuid.UUID, conn_id: int) -> bytes:
+    def setup(self, recipient_public: bytes, account: bytes, conn_id: int) -> bytes:
         """HPKE Base setup against the pinned sequencer public key.
 
         Returns the encapped key for ``hpke_setup``; the session is not
@@ -41,7 +39,7 @@ class CryptoSession:
             raise ValueError("HPKE conn_id must be non-zero")
         from ._hpke import info_for_conn
 
-        info = info_for_conn(user_uuid.bytes, conn_id)
+        info = info_for_conn(account, conn_id)
         encapped, sealed = setup_session(recipient_public, info)
         self._pending_sealed = sealed
         self._pending_conn_id = conn_id
@@ -64,12 +62,12 @@ class CryptoSession:
         self._pending_conn_id = 0
 
     @staticmethod
-    def setup_rest(recipient_public: bytes, user_uuid: uuid.UUID, request_id: int):
+    def setup_rest(recipient_public: bytes, account: bytes, request_id: int):
         """One-shot REST HPKE (order header uses conn_id=0)."""
         from ._hpke import info_for_rest_request, setup_session
 
         encapped, sealed = setup_session(
-            recipient_public, info_for_rest_request(user_uuid.bytes, request_id)
+            recipient_public, info_for_rest_request(account, request_id)
         )
         return encapped, sealed
 

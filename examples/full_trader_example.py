@@ -78,8 +78,8 @@ async def main() -> int:
         client_kwargs["base_url"] = edge
     if legacy_key:
         client_kwargs["api_key"] = legacy_key
-        if uid := get_first("GODARK_USER_UUID", "GDX_USER_UUID"):
-            client_kwargs["user_uuid"] = uid
+        if account := get_first("GODARK_ACCOUNT", "GDX_ACCOUNT"):
+            client_kwargs["account"] = account
     else:
         api_key_id = get_first("GODARK_API_KEY_ID", "GDX_API_KEY_ID")
         api_secret = get_first("GODARK_API_SECRET", "GDX_API_SECRET")
@@ -192,8 +192,8 @@ async def main() -> int:
         print(f"Failed to connect: {e}", file=sys.stderr)
         return 1
 
-    uid = client.user_uuid or ""
-    print(f"Authenticated as user_uuid={uid}  (session encrypted)")
+    account = client.account or ""
+    print(f"Authenticated as account={account}  (session encrypted)")
 
     try:
         await client.subscribe(["orders", "positions", "funding_rate"])

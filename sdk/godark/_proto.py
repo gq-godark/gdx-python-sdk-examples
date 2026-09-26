@@ -215,11 +215,11 @@ def _parse_node_response_with_expected(data: bytes, expected: str | None) -> tup
         raise
 
 
-def _uuid_bytes_to_str(raw: bytes) -> str:
-    """Convert 16 raw UUID bytes to a standard hyphenated UUID string."""
-    if len(raw) == _identity.USER_UUID_LEN:
-        return _identity.bytes_to_uuid(raw)
-    return "00000000-0000-0000-0000-000000000000"
+def _account_bytes_to_str(raw: bytes) -> str:
+    """Convert 32 account bytes to canonical base58."""
+    if len(raw) == _identity.ACCOUNT_LEN:
+        return _identity.bytes_to_account(raw)
+    return ""
 
 
 # Maximum legs / ids accepted in a single mass-quote, batch-cancel, or
@@ -237,8 +237,8 @@ def build_place_order_proto(
     symbol_id: int,
     side: str,
     order_type: str,
-    quantity: float,
-    user_uuid: bytes,
+    quantity: float | None,
+    account: bytes,
     price: float | None = None,
     time_in_force: str = "GTC",
     aon: bool = False,
@@ -251,7 +251,11 @@ def build_place_order_proto(
     """Build a bare PlaceOrderInput for HPKE sealing; return serialized bytes."""
     del timestamp  # legacy param; PlaceOrderInput no longer carries timestamp
     opts = options or PlaceOrderOptions()
+    if (quantity is None) == (opts.quote_notional is None):
+        raise ValueError("exactly one of quantity or options.quote_notional is required")
     if aon and min_fill_size is None:
+        if quantity is None:
+            raise ValueError("aon requires base quantity, not quote_notional")
         min_fill_size = quantity
     stp = opts.stp_mode.value if hasattr(opts.stp_mode, "value") else str(opts.stp_mode)
     place = sequencer_pb2.PlaceOrderInput(
@@ -260,15 +264,18 @@ def build_place_order_proto(
         order_type=_ORDER_TYPE_TO_PROTO[
             order_type if isinstance(order_type, str) else order_type.value
         ],
-        quantity=quantity,
         time_in_force=_TIME_IN_FORCE_TO_PROTO[
             time_in_force if isinstance(time_in_force, str) else time_in_force.value
         ],
-        user_uuid=user_uuid,
+        account=account,
         stp_mode=_STP_MODE_TO_PROTO.get(stp, 0),
         reduce_only=opts.reduce_only,
         post_only=opts.post_only,
     )
+    if quantity is not None:
+        place.quantity = quantity
+    if opts.quote_notional is not None:
+        place.quote_notional = opts.quote_notional
     if price is not None:
         place.price = price
     if min_fill_size is not None:
@@ -293,7 +300,7 @@ def build_place_order_proto(
 
 def build_cancel_order_proto(
     order_id: int,
-    user_uuid: bytes,
+    account: bytes,
     symbol_id: int,
     correlation_id_bytes: bytes,
 ) -> bytes:
@@ -302,14 +309,14 @@ def build_cancel_order_proto(
         order_id=order_id,
         symbol_id=symbol_id,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
-        user_uuid=user_uuid,
+        account=account,
     )
     return cancel.SerializeToString()
 
 
 def build_modify_order_proto(
     order_id: int,
-    user_uuid: bytes,
+    account: bytes,
     symbol_id: int,
     new_price: float | None = None,
     new_quantity: float | None = None,
@@ -321,7 +328,7 @@ def build_modify_order_proto(
         order_id=order_id,
         symbol_id=symbol_id,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
-        user_uuid=user_uuid,
+        account=account,
     )
     if new_price is not None:
         modify.new_price = new_price
@@ -333,35 +340,35 @@ def build_modify_order_proto(
     return modify.SerializeToString()
 
 
-def build_get_open_orders_proto(user_uuid: bytes, correlation_id_bytes: bytes = b"") -> bytes:
+def build_get_open_orders_proto(account: bytes, correlation_id_bytes: bytes = b"") -> bytes:
     """Build a bare GetOpenOrdersRequest for HPKE sealing."""
     inner = sequencer_pb2.GetOpenOrdersRequest(
-        user_uuid=user_uuid,
+        account=account,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
     )
     return inner.SerializeToString()
 
 
-def build_get_positions_proto(user_uuid: bytes, correlation_id_bytes: bytes = b"") -> bytes:
+def build_get_positions_proto(account: bytes, correlation_id_bytes: bytes = b"") -> bytes:
     """Build a bare GetPositionsRequest for HPKE sealing."""
     inner = sequencer_pb2.GetPositionsRequest(
-        user_uuid=user_uuid,
+        account=account,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
     )
     return inner.SerializeToString()
 
 
-def build_get_account_proto(user_uuid: bytes, correlation_id_bytes: bytes = b"") -> bytes:
+def build_get_account_proto(account: bytes, correlation_id_bytes: bytes = b"") -> bytes:
     """Build a bare GetAccountRequest for HPKE sealing."""
     inner = sequencer_pb2.GetAccountRequest(
-        user_uuid=user_uuid,
+        account=account,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
     )
     return inner.SerializeToString()
 
 
 def build_update_leverage_proto(
-    user_uuid: bytes,
+    account: bytes,
     symbol_id: int,
     leverage: int,
     correlation_id_bytes: bytes = b"",
@@ -369,7 +376,7 @@ def build_update_leverage_proto(
     """Build a bare UpdateLeverageRequest for HPKE sealing; return serialized bytes."""
     lev = max(1, int(leverage))
     update = sequencer_pb2.UpdateLeverageRequest(
-        user_uuid=user_uuid,
+        account=account,
         symbol_id=symbol_id,
         leverage=lev,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
@@ -379,12 +386,12 @@ def build_update_leverage_proto(
 
 def build_cancel_all_proto(
     symbol_id: int | None,
-    user_uuid: bytes,
+    account: bytes,
     correlation_id_bytes: bytes,
 ) -> bytes:
     """Build a bare CancelAllInput for HPKE sealing."""
     cancel_all = sequencer_pb2.CancelAllInput(
-        user_uuid=user_uuid,
+        account=account,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
     )
     if symbol_id is not None:
@@ -394,12 +401,12 @@ def build_cancel_all_proto(
 
 def build_close_all_proto(
     symbol_id: int | None,
-    user_uuid: bytes,
+    account: bytes,
     correlation_id_bytes: bytes,
 ) -> bytes:
     """Build a bare CloseAllInput for HPKE sealing."""
     close_all = sequencer_pb2.CloseAllInput(
-        user_uuid=user_uuid,
+        account=account,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
     )
     if symbol_id is not None:
@@ -409,20 +416,20 @@ def build_close_all_proto(
 
 def build_reverse_proto(
     symbol_id: int,
-    user_uuid: bytes,
+    account: bytes,
     correlation_id_bytes: bytes,
 ) -> bytes:
     """Build a bare ReverseInput for HPKE sealing."""
     reverse = sequencer_pb2.ReverseInput(
         symbol_id=symbol_id,
-        user_uuid=user_uuid,
+        account=account,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
     )
     return reverse.SerializeToString()
 
 
 def build_amend_tpsl_proto(
-    user_uuid: bytes,
+    account: bytes,
     order_id: int,
     correlation_id_bytes: bytes,
     *,
@@ -433,7 +440,7 @@ def build_amend_tpsl_proto(
 ) -> bytes:
     """Build a bare AmendTpslRequest for HPKE sealing."""
     amend = sequencer_pb2.AmendTpslRequest(
-        user_uuid=user_uuid,
+        account=account,
         order_id=order_id,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
     )
@@ -450,7 +457,7 @@ def build_amend_tpsl_proto(
 
 
 def build_cancel_tpsl_proto(
-    user_uuid: bytes,
+    account: bytes,
     order_id: int,
     correlation_id_bytes: bytes,
     *,
@@ -459,7 +466,7 @@ def build_cancel_tpsl_proto(
 ) -> bytes:
     """Build a bare CancelTpslRequest for HPKE sealing."""
     cancel = sequencer_pb2.CancelTpslRequest(
-        user_uuid=user_uuid,
+        account=account,
         order_id=order_id,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
     )
@@ -473,7 +480,7 @@ def build_cancel_tpsl_proto(
 
 def build_mass_quote_proto(
     symbol_id: int,
-    user_uuid: bytes,
+    account: bytes,
     legs: list[dict[str, Any]],
     correlation_id_bytes: bytes | None = None,
     leverage: int = 1,
@@ -498,7 +505,7 @@ def build_mass_quote_proto(
         raise ValueError(f"mass quote accepts at most {_MAX_BATCH_LEGS} legs, got {len(legs)}")
     mq = sequencer_pb2.MassQuoteInput(
         symbol_id=symbol_id,
-        user_uuid=user_uuid,
+        account=account,
     )
     if correlation_id_bytes is not None:
         mq.correlation_id = correlation_id_body_bytes(correlation_id_bytes)
@@ -528,7 +535,7 @@ def build_mass_quote_proto(
 
 def build_batch_cancel_proto(
     symbol_id: int,
-    user_uuid: bytes,
+    account: bytes,
     order_ids: list[int],
     correlation_id_bytes: bytes | None = None,
 ) -> bytes:
@@ -548,7 +555,7 @@ def build_batch_cancel_proto(
         )
     bc = sequencer_pb2.BatchCancelInput(
         symbol_id=symbol_id,
-        user_uuid=user_uuid,
+        account=account,
         order_ids=[int(oid) for oid in order_ids],
     )
     if correlation_id_bytes is not None:
@@ -559,7 +566,7 @@ def build_batch_cancel_proto(
 
 def build_batch_modify_proto(
     symbol_id: int,
-    user_uuid: bytes,
+    account: bytes,
     legs: list[dict[str, Any]],
     correlation_id_bytes: bytes | None = None,
 ) -> bytes:
@@ -585,7 +592,7 @@ def build_batch_modify_proto(
             raise ValueError(f"batch modify leg {i} must set new_price and/or new_quantity")
     bm = sequencer_pb2.BatchModifyInput(
         symbol_id=symbol_id,
-        user_uuid=user_uuid,
+        account=account,
     )
     if correlation_id_bytes is not None:
         bm.correlation_id = correlation_id_body_bytes(correlation_id_bytes)
@@ -606,7 +613,7 @@ def build_batch_modify_proto(
 
 
 def build_order_header_aad(
-    user_uuid: bytes,
+    account: bytes,
     symbol_id: int,
     request_type_str: str,
     nonce: int,
@@ -616,7 +623,7 @@ def build_order_header_aad(
 ) -> bytes:
     """Create an OrderHeader proto and serialize it (used as AES-GCM AAD)."""
     header = edge_pb2.OrderHeader(
-        user_uuid=user_uuid,
+        account=account,
         symbol_id=symbol_id,
         request_type=_REQUEST_TYPE_TO_PROTO[request_type_str],
         nonce=nonce,
@@ -628,7 +635,7 @@ def build_order_header_aad(
 
 
 def build_response_header_aad(
-    user_uuid: bytes,
+    account: bytes,
     message_type_str: str,
     body_length: int,
     nonce: int,
@@ -639,7 +646,7 @@ def build_response_header_aad(
 ) -> bytes:
     """Create a ResponseHeader proto and serialize it (used as AES-GCM AAD)."""
     header = edge_pb2.ResponseHeader(
-        user_uuid=user_uuid,
+        account=account,
         message_type=_RESPONSE_MESSAGE_TYPE_TO_PROTO[message_type_str],
         body_length=body_length,
         nonce=nonce,
@@ -898,11 +905,11 @@ def parse_leverage_settings_proto(msg: sequencer_pb2.LeverageSettings) -> Levera
     settings = tuple(
         LeverageSetting(symbol_id=row.symbol_id, leverage=row.leverage) for row in msg.settings
     )
-    user_uuid = _identity.bytes_to_uuid(msg.user_uuid) if msg.user_uuid else ""
+    account = _identity.bytes_to_account(msg.account) if msg.account else ""
     server_timestamp = int(msg.server_timestamp or 0)
     return LeverageSettings(
         settings=settings,
-        user_uuid=user_uuid,
+        account=account,
         server_timestamp=server_timestamp,
     )
 
@@ -928,7 +935,7 @@ def parse_order_update_proto(data: bytes) -> OrderUpdate:
 
     return OrderUpdate(
         order_id=str(msg.order_id),
-        user_uuid=_uuid_bytes_to_str(msg.user_uuid),
+        account=_account_bytes_to_str(msg.account),
         symbol_id=int(msg.symbol_id),
         side=_SIDE_FROM_PROTO.get(msg.side, Side.BUY),
         status=_ORDER_STATUS_FROM_PROTO.get(msg.order_status, OrderStatus.NEW),
@@ -1032,19 +1039,19 @@ def parse_open_orders_snapshot(data: bytes) -> OpenOrdersSnapshot:
 def parse_account_margin_update_proto(
     msg: sequencer_pb2.AccountMarginUpdate,
 ) -> AccountMarginUpdate:
-    account = None
-    if msg.HasField("account"):
-        a = msg.account
-        account = AccountMarginSummary(
+    summary = None
+    if msg.HasField("summary"):
+        a = msg.summary
+        summary = AccountMarginSummary(
             total_collateral=str(a.total_collateral),
             position_margin=str(a.position_margin),
             reserved_order_margin=str(a.reserved_order_margin),
             free_collateral=str(a.free_collateral),
         )
     return AccountMarginUpdate(
-        user_uuid=_uuid_bytes_to_str(msg.user_uuid),
+        account=_account_bytes_to_str(msg.account),
         server_timestamp=int(msg.server_timestamp),
-        account=account,
+        summary=summary,
     )
 
 
@@ -1063,7 +1070,7 @@ def parse_positions_snapshot_proto(msg: sequencer_pb2.PositionsSnapshot) -> Posi
 
     rows = tuple(parse_position_row_proto(r) for r in msg.rows)
     return PositionsSnapshot(
-        user_uuid=_uuid_bytes_to_str(msg.user_uuid),
+        account=_account_bytes_to_str(msg.account),
         rows=rows,
         server_timestamp=int(msg.server_timestamp),
         source=_parse_positions_snapshot_source(int(msg.source)),
@@ -1088,7 +1095,7 @@ def parse_system_health_proto(msg: health_pb2.HealthReport) -> SystemHealthUpdat
 
 def parse_balance_update_proto(msg: sequencer_pb2.BalanceUpdateMessage) -> BalanceUpdate:
     return BalanceUpdate(
-        user_uuid=_uuid_bytes_to_str(msg.user_uuid),
+        account=_account_bytes_to_str(msg.account),
         balance_raw=int(msg.balance_raw),
         timestamp=int(msg.timestamp),
         balance=msg.balance,

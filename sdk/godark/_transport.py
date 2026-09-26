@@ -52,11 +52,11 @@ def _normalize_inbound_message(msg: dict[str, Any]) -> dict[str, Any]:
                 "error": err_text or "authentication failed",
             }
         if isinstance(data, dict):
-            uid = data.get("user_uuid")
+            account = data.get("account")
             return {
                 "type": "auth_result",
                 "success": True,
-                "user_uuid": uid,
+                "account": account,
                 "conn_id": data.get("conn_id"),
                 "account_id": data.get("account_id"),
                 "session_id": data.get("session_id"),
