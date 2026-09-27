@@ -90,7 +90,11 @@ def subscription_callback_key(msg: dict[str, Any]) -> str | None:
     and ``funding_rate:``. Control messages return None so user callbacks are
     not invoked.
     """
-    typ = msg.get("type")
+    data = msg.get("data")
+    if not isinstance(data, dict):
+        data = {}
+    # Live edge embeds the snapshot on the subscribe ack: {op, data:{type:"volume_snapshot"}}.
+    typ = msg.get("type") or data.get("type")
     if typ in (
         "status",
         "subscribed",
@@ -99,7 +103,7 @@ def subscription_callback_key(msg: dict[str, Any]) -> str | None:
         "error",
     ):
         return None
-    symbol = msg.get("symbol") or ""
+    symbol = msg.get("symbol") or data.get("symbol") or ""
     if typ == "orderbook":
         return f"orderbook:{symbol}"
     if typ == "trade":
