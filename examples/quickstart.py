@@ -26,10 +26,15 @@ async def main() -> int:
     client_kwargs: dict = {"environment": Environment.TESTNET}
     if edge := get_first("GODARK_EDGE_URL", "GDX_EDGE_URL"):
         client_kwargs["base_url"] = edge
+    account = get_first("GODARK_ACCOUNT", "GDX_ACCOUNT")
+    deprecated_user_uuid = get_first("GODARK_USER_UUID", "GDX_USER_UUID")
+    if account:
+        client_kwargs["account"] = account
+    elif deprecated_user_uuid:
+        # Compatibility only. New integrations should configure GODARK_ACCOUNT.
+        client_kwargs["user_uuid"] = deprecated_user_uuid
     if legacy_key:
         client_kwargs["api_key"] = legacy_key
-        if uid := get_first("GODARK_USER_UUID", "GDX_USER_UUID"):
-            client_kwargs["user_uuid"] = uid
     else:
         api_key_id = get_first("GODARK_API_KEY_ID", "GDX_API_KEY_ID")
         api_secret = get_first("GODARK_API_SECRET", "GDX_API_SECRET")
@@ -49,8 +54,7 @@ async def main() -> int:
 
     try:
         async with GodarkClient(**client_kwargs) as client:
-            user = client.user_uuid or ""
-            print(f"Connected as user_uuid={user}")
+            print(f"Connected as account={client.account or ''}")
             try:
                 # Book confirmation waits on private order updates; subscribe first.
                 await client.subscribe(["orders"])

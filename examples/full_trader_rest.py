@@ -30,6 +30,12 @@ async def main() -> int:
     secret = get_first("GODARK_API_SECRET", "GDX_API_SECRET")
     pp = get_first("GODARK_PASSPHRASE", "GDX_PASSPHRASE")
     api_key = get_first("GODARK_API_KEY", "GDX_API_KEY")
+    identity_kwargs: dict = {}
+    if account := get_first("GODARK_ACCOUNT", "GDX_ACCOUNT"):
+        identity_kwargs["account"] = account
+    elif deprecated_user_uuid := get_first("GODARK_USER_UUID", "GDX_USER_UUID"):
+        # Compatibility only. New integrations should configure GODARK_ACCOUNT.
+        identity_kwargs["user_uuid"] = deprecated_user_uuid
     if kid and secret:
         if not pp:
             print(
@@ -38,10 +44,14 @@ async def main() -> int:
             )
             return 1
         client = GodarkRestClient(
-            api_key_id=kid, api_secret=secret, passphrase=pp, rest_base_url=rest
+            api_key_id=kid,
+            api_secret=secret,
+            passphrase=pp,
+            rest_base_url=rest,
+            **identity_kwargs,
         )
     elif api_key:
-        client = GodarkRestClient(api_key=api_key, rest_base_url=rest)
+        client = GodarkRestClient(api_key=api_key, rest_base_url=rest, **identity_kwargs)
     else:
         print(
             "Missing credentials: set GODARK_API_KEY_ID, GODARK_API_SECRET and "
@@ -52,9 +62,7 @@ async def main() -> int:
 
     price = _rest_limit_price()
     async with client:
-        print(
-            f"identity: user_uuid={client.user_uuid_str} scope={client.token_scope}"
-        )
+        print(f"identity: account={client.account_str} scope={client.token_scope}")
         print("open_orders", len((await client.get_open_orders()).rows))
         print("positions", len((await client.get_positions()).rows))
         acct = await client.get_account()

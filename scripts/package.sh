@@ -10,6 +10,7 @@
 #   ├── examples/
 #   │   ├── dotenv.py
 #   │   ├── full_trader_example.py
+#   │   ├── full_trader_rest.py
 #   │   └── quickstart.py
 #   └── wheels/
 #       └── godark-*.whl       (built from sdk/ via `pip wheel --no-deps`)
@@ -34,7 +35,7 @@ if [[ ! -f "${REPO_ROOT}/sdk/pyproject.toml" ]]; then
   echo "error: sdk/pyproject.toml missing — cannot build wheel" >&2
   exit 1
 fi
-for required in bundle/README.md bundle/SDK_REFERENCE.md .env.example examples/quickstart.py examples/full_trader_example.py examples/rest_client_example.py examples/dotenv.py; do
+for required in bundle/README.md bundle/SDK_REFERENCE.md .env.example examples/quickstart.py examples/full_trader_example.py examples/full_trader_rest.py examples/rest_client_example.py examples/dotenv.py; do
   if [[ ! -f "${REPO_ROOT}/${required}" ]]; then
     echo "error: required source file missing: ${required}" >&2
     exit 1
@@ -58,6 +59,7 @@ echo "Staging wheels-only distribution at $DEST ..."
 cp "${REPO_ROOT}/sdk/dist-wheels"/godark-*.whl "$DEST/wheels/"
 cp "${REPO_ROOT}/examples/quickstart.py" \
    "${REPO_ROOT}/examples/full_trader_example.py" \
+   "${REPO_ROOT}/examples/full_trader_rest.py" \
    "${REPO_ROOT}/examples/rest_client_example.py" \
    "${REPO_ROOT}/examples/dotenv.py" \
    "$DEST/examples/"
@@ -101,6 +103,8 @@ for required in \
   "${DIST_NAME}/wheels/godark-.*\\.whl" \
   "${DIST_NAME}/examples/quickstart\\.py" \
   "${DIST_NAME}/examples/full_trader_example\\.py" \
+  "${DIST_NAME}/examples/full_trader_rest\\.py" \
+  "${DIST_NAME}/examples/rest_client_example\\.py" \
   "${DIST_NAME}/examples/dotenv\\.py" \
   "${DIST_NAME}/README\\.md" \
   "${DIST_NAME}/SDK_REFERENCE\\.md" \

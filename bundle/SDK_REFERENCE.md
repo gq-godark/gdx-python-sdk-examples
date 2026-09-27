@@ -3,11 +3,10 @@
 This reference describes the API and workflow used by the market-maker-facing
 distribution in this repository.
 
-The MM examples use WebSocket encrypted trading via `godark.GodarkClient`.
-Encrypted REST trading is not supported — all order flow (place / modify /
-cancel / mass-quote) runs over the HPKE WebSocket client. Standalone
-market-data clients exist in the upstream SDK but are excluded from this
-distribution.
+The primary integration is encrypted WebSocket trading via
+`godark.GodarkClient`, which also provides private push streams. The
+distribution additionally includes `godark.GodarkRestClient` for one-shot HPKE
+REST trading, encrypted snapshots, order lookup, and public market-data reads.
 
 Order placement support in this MM distribution is limited to `MARKET` and
 `LIMIT`.
@@ -329,6 +328,22 @@ pip install wheels/godark-*.whl
 from godark import GodarkClient, OrderType, Side, TimeInForce
 ```
 
-## RestClient example
+## GodarkRestClient API
 
-`GodarkRestClient` is exercised by `rest_client_example` / `rest-client-example`: REST auth, `/auth/me`, leverage read, and public funding/OI/volume GETs. Encrypted place/cancel/modify/update-leverage remain WebSocket-only via `GodarkClient`.
+Use `GodarkClient` as the primary client when you need private real-time
+updates. `GodarkRestClient` supports API-key authentication and these actual
+REST operations:
+
+- Encrypted snapshots: `get_open_orders()`, `get_positions()`, `get_account()`
+- Encrypted trading: `place_order()`, `cancel_order()`,
+  `cancel_order_by_client_id()`, `modify_order()`, `update_leverage()`,
+  `mass_quote()`, `batch_cancel()`, and `batch_modify()`
+- Order reads: `get_order()`, `get_order_by_client_id()`, and
+  `await_terminal_status()`
+- Public reads (no `connect()` required): `get_funding_rates()`,
+  `get_open_interest()`, and `get_volume()`
+
+After `connect()`, `account` and `account_str` expose the canonical base58
+account. The constructor's `user_uuid=` argument and `user_uuid` property are
+deprecated compatibility aliases only; new integrations should use `account=`.
+`full_trader_rest.py` demonstrates encrypted snapshots and place/modify/cancel.
