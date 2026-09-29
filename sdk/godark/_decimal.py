@@ -18,9 +18,10 @@ def format_decimal(value: float | int | str | Decimal, decimals: int) -> str:
     """
     if decimals < 0:
         raise ValueError(f"decimals must be >= 0, got {decimals}")
-    if isinstance(value, float):
-        if value != value or value in (float("inf"), float("-inf")):  # noqa: PLR0124
-            raise ValueError(f"not a finite number: {value}")
+    if isinstance(value, float) and (
+        value != value or value in (float("inf"), float("-inf"))  # noqa: PLR0124
+    ):
+        raise ValueError(f"not a finite number: {value}")
     try:
         d = value if isinstance(value, Decimal) else Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
@@ -47,7 +48,7 @@ def parse_decimal(value: str | float | int | Decimal | None) -> float | None:
         return None
     if isinstance(value, bool):
         raise ValueError(f"not a decimal number: {value!r}")
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         return float(value)
     if isinstance(value, Decimal):
         return float(value)
