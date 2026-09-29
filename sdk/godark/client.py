@@ -16,7 +16,12 @@ from typing import Any, Literal, TypeVar
 from . import _identity, _proto
 from ._hpke import pinned_sequencer_static_pub
 from ._session import CryptoSession
-from ._symbols import load_offline_symbol_map, load_symbol_map_from_edge
+from ._symbols import (
+    InstrumentDecimals,
+    load_instruments_from_edge,
+    load_offline_decimals_map,
+    load_offline_symbol_map,
+)
 from ._transport import EdgeTransport, TransportConfig
 from ._wire import build_order_header_proto, encode_encrypted_order, encrypted_order_request
 from .enums import (
@@ -317,10 +322,16 @@ class GodarkClient:
             resolved_passphrase = _resolve_passphrase(passphrase)
             if resolved_passphrase is None:
                 raise ValueError("passphrase is required when using api_key_id and api_secret")
-            self._auth_token = f"{api_key_id}:{api_secret}:{resolved_passphrase}"
+            self._api_key_id = api_key_id
+            self._api_secret = api_secret
+            self._passphrase = resolved_passphrase
+            self._auth_token: str | None = None
         elif api_key is not None:
             if passphrase is not None and str(passphrase).strip() != "":
                 raise ValueError("passphrase must not be set when using legacy api_key")
+            self._api_key_id = None
+            self._api_secret = None
+            self._passphrase = None
             self._auth_token = api_key
         else:
             raise ValueError("provide api_key or both api_key_id and api_secret")
@@ -336,6 +347,9 @@ class GodarkClient:
         self._auto_reconnect = auto_reconnect
         self._user_symbol_map = symbol_map is not None
         self._symbol_map = dict(symbol_map) if symbol_map is not None else load_offline_symbol_map()
+        self._decimals_map: dict[str, InstrumentDecimals] = (
+            load_offline_decimals_map() if symbol_map is None else {}
+        )
         self._transport_config = transport
         pin_env = (
             _infer_environment_from_edge_url(base_url)
@@ -465,7 +479,7 @@ class GodarkClient:
         if not self._user_symbol_map:
             from .rest_client import _ws_origin_to_http_rest
 
-            self._symbol_map = await load_symbol_map_from_edge(
+            self._symbol_map, self._decimals_map = await load_instruments_from_edge(
                 _ws_origin_to_http_rest(self._base_url)
             )
 
@@ -476,7 +490,8 @@ class GodarkClient:
         self._transport.on_disconnect = self._on_transport_disconnect
         self._transport.on_stale = self._on_transport_stale
 
-        auth_result = await self._transport.authenticate(self._auth_token)
+        auth_token = await self._resolve_ws_login_token()
+        auth_result = await self._transport.authenticate(auth_token)
         if not auth_result.get("success"):
             await self._transport.disconnect()
             raise AuthenticationError(auth_result.get("error", "authentication failed"))
@@ -601,6 +616,7 @@ class GodarkClient:
             correlation_id_bytes=corr_id,
             options=options,
             timestamp=_timestamp_ns(),
+            scale=self._resolve_scale(symbol),
         )
 
         waiter = self._register_place_outcome_waiter() if confirmation == "book" else None
@@ -653,6 +669,7 @@ class GodarkClient:
             new_quantity=new_quantity,
             new_trigger_price=new_trigger_price,
             correlation_id_bytes=corr_id,
+            scale=self._resolve_scale(symbol),
         )
 
         return await self._send_encrypted_order("modify", symbol_id, plaintext, corr_id)
@@ -753,6 +770,7 @@ class GodarkClient:
             stop_loss_price=stop_loss_price,
             symbol_id=body_symbol_id,
             position_side=position_side,
+            scale=self._resolve_scale(symbol),
         )
         response = await self._send_encrypted_command(
             "amend_tpsl", "amend_tpsl", symbol_id, plaintext, corr_id
@@ -821,6 +839,7 @@ class GodarkClient:
             correlation_id_bytes=corr_id,
             leverage=leverage,
             post_only=post_only,
+            scale=self._resolve_scale(symbol),
         )
         response = await self._send_encrypted_command(
             "mass_quote", "order.mass_quote", symbol_id, plaintext, corr_id
@@ -881,6 +900,7 @@ class GodarkClient:
             account=self._account_bytes(),
             legs=legs,
             correlation_id_bytes=corr_id,
+            scale=self._resolve_scale(symbol),
         )
         response = await self._send_encrypted_command(
             "batch_modify", "order.batch_modify", symbol_id, plaintext, corr_id
@@ -1737,3 +1757,37 @@ class GodarkClient:
         if sid is None:
             raise ValueError(f"Unknown symbol '{symbol}'. Known: {list(self._symbol_map.keys())}")
         return sid
+
+    def _resolve_scale(self, symbol: str) -> InstrumentDecimals:
+        scale = self._decimals_map.get(symbol)
+        if scale is not None:
+            return scale
+        # Conservative venue max when symbol decimals were not loaded.
+        return InstrumentDecimals(price_decimals=8, quantity_decimals=8)
+
+    async def _resolve_ws_login_token(self) -> str:
+        """Return the WebSocket login token (JWT for key triple, opaque for legacy)."""
+        if self._api_key_id is None:
+            if not self._auth_token:
+                raise AuthenticationError("missing login token")
+            return self._auth_token
+
+        from ._rest_transport import RestTransport
+        from .rest_client import _ws_origin_to_http_rest
+
+        http = RestTransport(_ws_origin_to_http_rest(self._base_url))
+        try:
+            auth_data = await http.auth_token(
+                grant_type="client_credentials",
+                client_id=self._api_key_id,
+                client_secret=self._api_secret,
+                passphrase=self._passphrase,
+            )
+        finally:
+            await http.aclose()
+
+        token = auth_data.get("access_token")
+        if not isinstance(token, str) or not token:
+            raise AuthenticationError("auth/token response missing access_token")
+        self._auth_token = token
+        return token

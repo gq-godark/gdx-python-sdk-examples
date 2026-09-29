@@ -16,7 +16,12 @@ from ._hpke import SealedSession, nonce_from_u64, pinned_sequencer_static_pub
 from ._identity import account_to_bytes
 from ._rest_transport import RestEnvelopeError, RestTransport
 from ._session import CryptoSession
-from ._symbols import load_offline_symbol_map, load_symbol_map_from_edge
+from ._symbols import (
+    InstrumentDecimals,
+    load_instruments_from_edge,
+    load_offline_decimals_map,
+    load_offline_symbol_map,
+)
 from .client import Environment, _resolve_hpke_static_public_key_hex, _resolve_passphrase
 from .enums import OrderType, Side, TimeInForce
 from .errors import EncryptionError, OrderError, SessionError, TimeoutError
@@ -154,6 +159,9 @@ class GodarkRestClient:
         self._rest_base = _resolve_rest_base_url(rest_base_url)
         self._user_symbol_map = symbol_map is not None
         self._symbol_map = dict(symbol_map) if symbol_map is not None else load_offline_symbol_map()
+        self._decimals_map: dict[str, InstrumentDecimals] = (
+            load_offline_decimals_map() if symbol_map is None else {}
+        )
         self._http = RestTransport(self._rest_base)
         self._bearer: str | None = None
         if account is not None and user_uuid is not None:
@@ -201,6 +209,12 @@ class GodarkRestClient:
             raise ValueError(f"unknown symbol: {symbol}")
         return sid
 
+    def _resolve_scale(self, symbol: str) -> InstrumentDecimals:
+        scale = self._decimals_map.get(symbol)
+        if scale is not None:
+            return scale
+        return InstrumentDecimals(price_decimals=8, quantity_decimals=8)
+
     def _account_bytes(self) -> bytes:
         if self._account is None:
             raise SessionError("Not authenticated")
@@ -208,7 +222,7 @@ class GodarkRestClient:
 
     async def connect(self) -> None:
         if not self._user_symbol_map:
-            self._symbol_map = await load_symbol_map_from_edge(self._rest_base)
+            self._symbol_map, self._decimals_map = await load_instruments_from_edge(self._rest_base)
         if self._api_key_id is not None:
             auth_data = await self._http.auth_token(
                 grant_type="client_credentials",
@@ -570,6 +584,7 @@ class GodarkRestClient:
             expiry_time=expiry_time,
             correlation_id_bytes=corr_id,
             timestamp=_timestamp_ns(),
+            scale=self._resolve_scale(symbol),
         )
 
         ack = await self._send_encrypted_order(
@@ -672,6 +687,7 @@ class GodarkRestClient:
             new_quantity=new_quantity,
             new_trigger_price=new_trigger_price,
             correlation_id_bytes=corr_id,
+            scale=self._resolve_scale(symbol),
         )
         return await self._send_encrypted(
             "modify",
@@ -762,6 +778,7 @@ class GodarkRestClient:
             correlation_id_bytes=corr_id,
             leverage=leverage,
             post_only=post_only,
+            scale=self._resolve_scale(symbol),
         )
         sealed, raw = await self._send_encrypted_envelope(
             "mass_quote",
@@ -801,6 +818,7 @@ class GodarkRestClient:
             account=self._account_bytes(),
             legs=legs,
             correlation_id_bytes=corr_id,
+            scale=self._resolve_scale(symbol),
         )
         sealed, raw = await self._send_encrypted_envelope(
             "batch_modify",

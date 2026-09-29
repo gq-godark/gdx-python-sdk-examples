@@ -16,6 +16,8 @@ from gdx.health.v1 import health_pb2  # noqa: E402
 from gdx.sequencer.v1 import sequencer_pb2  # noqa: E402
 
 from . import _identity  # noqa: E402
+from ._decimal import format_decimal  # noqa: E402
+from ._symbols import InstrumentDecimals  # noqa: E402
 from .enums import (  # noqa: E402
     _CANCEL_REASON_FROM_PROTO,
     _ORDER_STATUS_FROM_PROTO,
@@ -29,6 +31,9 @@ from .enums import (  # noqa: E402
     _TIME_IN_FORCE_TO_PROTO,
     Side,
 )
+
+# Offline-safe defaults when callers omit instrument scale (unit tests).
+_DEFAULT_SCALE = InstrumentDecimals(price_decimals=8, quantity_decimals=8)
 from .types import (  # noqa: E402
     AccountMarginSummary,
     AccountMarginUpdate,
@@ -247,9 +252,11 @@ def build_place_order_proto(
     correlation_id_bytes: bytes | None = None,
     options: PlaceOrderOptions | None = None,
     timestamp: int = 0,
+    scale: InstrumentDecimals | None = None,
 ) -> bytes:
     """Build a bare PlaceOrderInput for HPKE sealing; return serialized bytes."""
     del timestamp  # legacy param; PlaceOrderInput no longer carries timestamp
+    scale = scale or _DEFAULT_SCALE
     opts = options or PlaceOrderOptions()
     if (quantity is None) == (opts.quote_notional is None):
         raise ValueError("exactly one of quantity or options.quote_notional is required")
@@ -273,13 +280,13 @@ def build_place_order_proto(
         post_only=opts.post_only,
     )
     if quantity is not None:
-        place.quantity = quantity
+        place.quantity = format_decimal(quantity, scale.quantity_decimals)
     if opts.quote_notional is not None:
-        place.quote_notional = opts.quote_notional
+        place.quote_notional = format_decimal(opts.quote_notional, scale.price_decimals)
     if price is not None:
-        place.price = price
+        place.price = format_decimal(price, scale.price_decimals)
     if min_fill_size is not None:
-        place.min_fill_size = min_fill_size
+        place.min_fill_size = format_decimal(min_fill_size, scale.quantity_decimals)
     if expiry_time is not None:
         place.expiry_time = expiry_time
     if correlation_id_bytes is not None:
@@ -287,11 +294,11 @@ def build_place_order_proto(
     if opts.peg_offset_bps is not None:
         place.peg_offset_bps = opts.peg_offset_bps
     if opts.trigger_price is not None:
-        place.trigger_price = opts.trigger_price
+        place.trigger_price = format_decimal(opts.trigger_price, scale.price_decimals)
     if opts.take_profit_price is not None:
-        place.take_profit_price = opts.take_profit_price
+        place.take_profit_price = format_decimal(opts.take_profit_price, scale.price_decimals)
     if opts.stop_loss_price is not None:
-        place.stop_loss_price = opts.stop_loss_price
+        place.stop_loss_price = format_decimal(opts.stop_loss_price, scale.price_decimals)
     if opts.slippage_bps is not None:
         place.slippage_bps = opts.slippage_bps
 
@@ -322,8 +329,10 @@ def build_modify_order_proto(
     new_quantity: float | None = None,
     new_trigger_price: float | None = None,
     correlation_id_bytes: bytes = b"",
+    scale: InstrumentDecimals | None = None,
 ) -> bytes:
     """Build a bare ModifyOrderInput for HPKE sealing; return serialized bytes."""
+    scale = scale or _DEFAULT_SCALE
     modify = sequencer_pb2.ModifyOrderInput(
         order_id=order_id,
         symbol_id=symbol_id,
@@ -331,11 +340,11 @@ def build_modify_order_proto(
         account=account,
     )
     if new_price is not None:
-        modify.new_price = new_price
+        modify.new_price = format_decimal(new_price, scale.price_decimals)
     if new_quantity is not None:
-        modify.new_quantity = new_quantity
+        modify.new_quantity = format_decimal(new_quantity, scale.quantity_decimals)
     if new_trigger_price is not None:
-        modify.new_trigger_price = new_trigger_price
+        modify.new_trigger_price = format_decimal(new_trigger_price, scale.price_decimals)
 
     return modify.SerializeToString()
 
@@ -437,17 +446,19 @@ def build_amend_tpsl_proto(
     stop_loss_price: float | None = None,
     symbol_id: int | None = None,
     position_side: str | Side | None = None,
+    scale: InstrumentDecimals | None = None,
 ) -> bytes:
     """Build a bare AmendTpslRequest for HPKE sealing."""
+    scale = scale or _DEFAULT_SCALE
     amend = sequencer_pb2.AmendTpslRequest(
         account=account,
         order_id=order_id,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
     )
     if take_profit_price is not None:
-        amend.take_profit_price = take_profit_price
+        amend.take_profit_price = format_decimal(take_profit_price, scale.price_decimals)
     if stop_loss_price is not None:
-        amend.stop_loss_price = stop_loss_price
+        amend.stop_loss_price = format_decimal(stop_loss_price, scale.price_decimals)
     if symbol_id is not None:
         amend.symbol_id = symbol_id
     if position_side is not None:
@@ -485,6 +496,7 @@ def build_mass_quote_proto(
     correlation_id_bytes: bytes | None = None,
     leverage: int = 1,
     post_only: bool | None = None,
+    scale: InstrumentDecimals | None = None,
 ) -> bytes:
     """Build a bare MassQuoteInput for HPKE sealing; return serialized bytes.
 
@@ -499,6 +511,7 @@ def build_mass_quote_proto(
     Raises ``ValueError`` if ``legs`` is empty or has more than 20 entries.
     """
     del leverage  # legacy param; MassQuoteInput no longer carries leverage
+    scale = scale or _DEFAULT_SCALE
     if not legs:
         raise ValueError("mass quote requires at least one leg")
     if len(legs) > _MAX_BATCH_LEGS:
@@ -516,8 +529,8 @@ def build_mass_quote_proto(
         tif = leg.get("time_in_force", "GTC")
         pb_leg = mq.legs.add()
         pb_leg.side = _SIDE_TO_PROTO[side if isinstance(side, str) else side.value]
-        pb_leg.price = float(leg["price"])
-        pb_leg.quantity = float(leg["quantity"])
+        pb_leg.price = format_decimal(leg["price"], scale.price_decimals)
+        pb_leg.quantity = format_decimal(leg["quantity"], scale.quantity_decimals)
         pb_leg.time_in_force = _TIME_IN_FORCE_TO_PROTO[tif if isinstance(tif, str) else tif.value]
         cancel_id = leg.get("cancel_order_id")
         # cancel_order_id is plain uint64; 0 means "pure place" (no cancel target).
@@ -569,6 +582,7 @@ def build_batch_modify_proto(
     account: bytes,
     legs: list[dict[str, Any]],
     correlation_id_bytes: bytes | None = None,
+    scale: InstrumentDecimals | None = None,
 ) -> bytes:
     """Build a bare BatchModifyInput for HPKE sealing; return serialized bytes.
 
@@ -583,6 +597,7 @@ def build_batch_modify_proto(
     contains a leg with neither ``new_price`` nor ``new_quantity`` set (a no-op
     amend that the node would reject).
     """
+    scale = scale or _DEFAULT_SCALE
     if not legs:
         raise ValueError("batch modify requires at least one leg")
     if len(legs) > _MAX_BATCH_LEGS:
@@ -601,9 +616,9 @@ def build_batch_modify_proto(
         pb_leg = bm.legs.add()
         pb_leg.order_id = int(leg["order_id"])
         if leg.get("new_price") is not None:
-            pb_leg.new_price = float(leg["new_price"])
+            pb_leg.new_price = format_decimal(leg["new_price"], scale.price_decimals)
         if leg.get("new_quantity") is not None:
-            pb_leg.new_quantity = float(leg["new_quantity"])
+            pb_leg.new_quantity = format_decimal(leg["new_quantity"], scale.quantity_decimals)
         # Each leg carries a unique 16-byte correlation_id (wire requires exactly
         # 16 bytes per leg). Callers may supply one; otherwise generate a fresh one.
         leg_cid = leg.get("correlation_id")
