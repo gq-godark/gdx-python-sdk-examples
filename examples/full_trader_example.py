@@ -119,8 +119,8 @@ async def main() -> int:
 
     # BTC-USDC-PERP is symbol_id 1; capture its live mark from snapshots so the
     # mass-quote ladder/cross prices below can anchor to the real touch instead
-    # of a fixed constant.
-    last_mark: dict[str, float] = {}
+    # of a fixed constant. Keep the venue decimal string (no float→str).
+    last_mark: dict[str, str] = {}
 
     def on_snap(s: PositionsSnapshot) -> None:
         bump("positions_snapshot")
@@ -130,10 +130,7 @@ async def main() -> int:
         )
         for row in s.rows:
             if row.symbol_id == 1 and row.mark_price:
-                try:
-                    last_mark["BTC"] = float(row.mark_price)
-                except (TypeError, ValueError):
-                    pass
+                last_mark["BTC"] = row.mark_price
             mark = row.mark_price or "—"
             print(
                 f"  ↳ symbol={row.symbol_id}  side={row.side}  "
@@ -331,9 +328,9 @@ async def main() -> int:
     base = last_mark.get("BTC") or os.environ.get("GDX_BASE", "64000")
     print(f"Mass-quoting a 3-level BUY ladder (post-only), base={base}...")
     ladder = [
-        {"side": Side.BUY, "price": decimal_mul(str(base), "0.997"), "quantity": "0.02"},
-        {"side": Side.BUY, "price": decimal_mul(str(base), "0.994"), "quantity": "0.02"},
-        {"side": Side.BUY, "price": decimal_mul(str(base), "0.991"), "quantity": "0.02"},
+        {"side": Side.BUY, "price": decimal_mul(base, "0.997"), "quantity": "0.02"},
+        {"side": Side.BUY, "price": decimal_mul(base, "0.994"), "quantity": "0.02"},
+        {"side": Side.BUY, "price": decimal_mul(base, "0.991"), "quantity": "0.02"},
     ]
     resting_ids: list[int] = []
     try:
@@ -367,7 +364,7 @@ async def main() -> int:
     # ~5% above the live mark: aggressive enough to cross the resting ask, yet
     # within the exchange's 10%-of-oracle limit. Anchored to the live mark, this
     # makes the post_only=true (reject) vs false (fill) contrast deterministic.
-    cross_px = decimal_mul(str(base), "1.05")
+    cross_px = decimal_mul(base, "1.05")
     # post_only=True: a crossing leg is rejected (would-cross, error_code 2018).
     print("Mass-quoting a crossing BUY with post_only=True (expect rejected/2018)...")
     try:

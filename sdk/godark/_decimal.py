@@ -1,8 +1,10 @@
 """Decimal-string encode/decode for sealed order prices and sizes.
 
-Public SDK trading methods take human decimal *strings* (e.g. ``"67500.0"``,
-``"0.001"``). The sealed protobuf uses the same decimal text, normalized to
-each instrument's ``price_decimals`` / ``quantity_decimals``.
+Public SDK trading methods take human decimal *strings* only (e.g. ``"67500.0"``,
+``"0.001"``). ``int``, ``float``, and ``bool`` are rejected with ``TypeError``;
+there is no numeric coercion before seal. The sealed protobuf uses the same
+decimal text, normalized to each instrument's ``price_decimals`` /
+``quantity_decimals``.
 """
 
 from __future__ import annotations
@@ -12,17 +14,26 @@ from decimal import Decimal, InvalidOperation
 __all__ = ["format_decimal", "parse_decimal", "parse_decimal_required"]
 
 
+def _require_decimal_str(value: object) -> str:
+    """Public trading amounts must be ``str``; reject int/float/bool and other types."""
+    if not isinstance(value, str):
+        raise TypeError(
+            "decimal value must be str "
+            f"(got {type(value).__name__}); int/float/bool are not accepted"
+        )
+    return value
+
+
 def format_decimal(value: str, decimals: int) -> str:
     """Normalize a public decimal string for the wire.
 
-    Accepts only ``str`` decimal text (no ``float``/``int`` conversion). Rejects
-    empty input, non-decimal text, scientific notation, non-finite values,
-    negatives, and values with more fractional digits than ``decimals``
-    (never rounds). Pads with trailing zeros to exactly ``decimals`` places
-    when ``decimals > 0``.
+    Accepts only ``str`` decimal text. ``int``, ``float``, and ``bool`` raise
+    ``TypeError`` (no coercion). Also rejects empty input, non-decimal text,
+    scientific notation, non-finite values, negatives, and values with more
+    fractional digits than ``decimals`` (never rounds). Pads with trailing
+    zeros to exactly ``decimals`` places when ``decimals > 0``.
     """
-    if not isinstance(value, str):
-        raise TypeError(f"decimal value must be str, got {type(value).__name__}")
+    value = _require_decimal_str(value)
     if decimals < 0:
         raise ValueError(f"decimals must be >= 0, got {decimals}")
 
@@ -63,8 +74,7 @@ def parse_decimal(value: str | None) -> str | None:
     """Validate a wire decimal string and return the trimmed text (or None)."""
     if value is None:
         return None
-    if not isinstance(value, str):
-        raise TypeError(f"decimal value must be str, got {type(value).__name__}")
+    value = _require_decimal_str(value)
     s = value.strip()
     if not s:
         return None

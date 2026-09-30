@@ -30,8 +30,8 @@ async def main():
             "BTC-USDC-PERP",
             Side.SELL,
             OrderType.LIMIT,
-            0.01,
-            price=999_999.0,
+            "0.01",
+            price="999999.0",
             time_in_force=TimeInForce.GTC,
         )
         await client.cancel_order(ack.order_id, "BTC-USDC-PERP")
@@ -84,6 +84,12 @@ helper loads it from the repo root; OS environment variables win over `.env` val
 - `stream_buffer_size=256` — bound for every push queue (see *Async iterators* below).
 
 ### Trading commands
+
+Prices and sizes (`quantity`, `price`, `min_fill_size`, `quote_notional`,
+`trigger_price`, TP/SL, `new_price` / `new_quantity` / `new_trigger_price`,
+mass-quote legs) are **decimal strings only** (e.g. `"67500.0"`, `"0.01"`).
+Passing `int`, `float`, or `bool` raises `TypeError` — there is no numeric
+coercion before seal.
 
 | Method | Signature | Purpose |
 |--------|-----------|---------|

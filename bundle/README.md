@@ -97,8 +97,8 @@ async def main():
             "BTC-USDC-PERP",
             Side.SELL,
             OrderType.LIMIT,
-            0.01,
-            price=999_999.0,
+            "0.01",
+            price="999999.0",
             time_in_force=TimeInForce.GTC,
         )
         await client.cancel_order(str(ack.order_id), "BTC-USDC-PERP")

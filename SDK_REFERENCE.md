@@ -86,8 +86,10 @@ helper loads it from the repo root; OS environment variables win over `.env` val
 ### Trading commands
 
 Prices and sizes (`quantity`, `price`, `min_fill_size`, `quote_notional`,
-`trigger_price`, TP/SL, `new_price` / `new_quantity`, mass-quote legs) are
-**decimal strings** (e.g. `"67500.0"`, `"0.01"`). Floats are rejected.
+`trigger_price`, TP/SL, `new_price` / `new_quantity` / `new_trigger_price`,
+mass-quote legs) are **decimal strings only** (e.g. `"67500.0"`, `"0.01"`).
+Passing `int`, `float`, or `bool` raises `TypeError` — there is no numeric
+coercion before seal.
 
 | Method | Signature | Purpose |
 |--------|-----------|---------|
