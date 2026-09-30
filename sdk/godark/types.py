@@ -104,11 +104,11 @@ class PlaceOrderOptions:
     post_only: bool = False
     stp_mode: str = "UNSPECIFIED"
     peg_offset_bps: int | None = None
-    trigger_price: float | None = None
-    take_profit_price: float | None = None
-    stop_loss_price: float | None = None
+    trigger_price: str | None = None
+    take_profit_price: str | None = None
+    stop_loss_price: str | None = None
     slippage_bps: int | None = None
-    quote_notional: float | None = None
+    quote_notional: str | None = None
 
 
 @dataclass(frozen=True)

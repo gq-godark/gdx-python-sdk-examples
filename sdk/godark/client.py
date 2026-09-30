@@ -291,7 +291,7 @@ class GodarkClient:
         ) as client:
             ack = await client.place_order(
                 symbol="BTC-USDC-PERP", side="BUY", order_type="LIMIT",
-                price=67500.0, quantity=0.1,
+                price="67500.0", quantity="0.1",
             )
             print(ack.order_id)
     """
@@ -578,11 +578,11 @@ class GodarkClient:
         symbol: str,
         side: str | Side,
         order_type: str | OrderType,
-        quantity: float | None = None,
-        price: float | None = None,
+        quantity: str | None = None,
+        price: str | None = None,
         time_in_force: str | TimeInForce = "GTC",
         aon: bool = False,
-        min_fill_size: float | None = None,
+        min_fill_size: str | None = None,
         expiry_time: int | None = None,
         confirmation: Literal["ack", "book"] = "book",
         options: PlaceOrderOptions | None = None,
@@ -652,11 +652,11 @@ class GodarkClient:
         self,
         order_id: str,
         symbol: str = "BTC-USDC-PERP",
-        new_price: float | None = None,
-        new_quantity: float | None = None,
-        new_trigger_price: float | None = None,
+        new_price: str | None = None,
+        new_quantity: str | None = None,
+        new_trigger_price: str | None = None,
     ) -> OrderAck:
-        """Modify an existing order's price and/or quantity."""
+        """Modify an existing order's price and/or quantity (decimal strings)."""
         self._ensure_ready()
         symbol_id = self._resolve_symbol(symbol)
         corr_id = _new_correlation_id()
@@ -750,8 +750,8 @@ class GodarkClient:
         symbol: str,
         order_id: str | int,
         *,
-        take_profit_price: float | None = None,
-        stop_loss_price: float | None = None,
+        take_profit_price: str | None = None,
+        stop_loss_price: str | None = None,
         position_side: str | Side | None = None,
     ) -> TpslAck:
         """Amend / attach TP-SL on a resting order or open position."""
@@ -814,9 +814,10 @@ class GodarkClient:
         """Bulk cancel-replace (market-maker mass quote).
 
         Each ``leg`` is a dict with: ``side`` ("BUY"/"SELL" or :class:`Side`),
-        ``price`` (float), ``quantity`` (float), optional ``cancel_order_id``
-        (int; omit/0 = pure place), ``time_in_force`` ("GTC"/"GTD", default GTC),
-        ``expiry_time`` (ns, GTD only). Up to 20 legs per batch, single symbol.
+        ``price`` (decimal ``str``), ``quantity`` (decimal ``str``), optional
+        ``cancel_order_id`` (int; omit/0 = pure place), ``time_in_force``
+        ("GTC"/"GTD", default GTC), ``expiry_time`` (ns, GTD only). Up to 20
+        legs per batch, single symbol.
 
         ``post_only`` controls the batch matching mode. Left as ``None`` (the
         default) every replacement is post-only: a leg that would cross is
@@ -883,8 +884,9 @@ class GodarkClient:
         """Amend multiple resting orders in a single fanned-out post-only request.
 
         ``legs`` is a list of dicts on one ``symbol`` (up to 20 per batch); each
-        leg supports ``order_id`` (int, required), ``new_price`` (float|None) and
-        ``new_quantity`` (float|None) — at least one of the two must be set.
+        leg supports ``order_id`` (int, required), ``new_price`` (decimal
+        ``str``|None) and ``new_quantity`` (decimal ``str``|None) — at least one
+        of the two must be set.
         Amends are post-only: a leg whose amended order would cross is rejected
         (``modified=False``, error_code 2018) rather than taking liquidity, and a
         missing order id is reported ``modified=False`` (error_code 2003); neither

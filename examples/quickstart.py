@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from decimal import Decimal
 
 from dotenv import get_first, load_dotenv, print_order_error
 from godark import Environment, GodarkClient, OrderType, PlaceOrderOptions, Side, TimeInForce
@@ -12,11 +13,16 @@ from godark import Environment, GodarkClient, OrderType, PlaceOrderOptions, Side
 SYMBOL = "BTC-USDC-PERP"
 
 
-def live_mark_price() -> float:
+def live_mark_price() -> str:
     raw = get_first("GODARK_E2E_PRICE", "GDX_E2E_PRICE", "GDX_LIVE_PRICE")
     if raw:
-        return float(raw)
-    return 79_000.0
+        return raw.strip()
+    return "79000.0"
+
+
+def decimal_mul(value: str, factor: str, places: int = 1) -> str:
+    q = Decimal("1").scaleb(-places)
+    return format((Decimal(value) * Decimal(factor)).quantize(q), "f")
 
 
 async def main() -> int:
@@ -60,12 +66,12 @@ async def main() -> int:
                 await client.subscribe(["orders"])
                 await asyncio.sleep(0.35)
                 mark = live_mark_price()
-                sell_px = round(mark * 1.03, 1)
+                sell_px = decimal_mul(mark, "1.03")
                 ack = await client.place_order(
                     SYMBOL,
                     Side.SELL,
                     OrderType.LIMIT,
-                    0.01,
+                    "0.01",
                     price=sell_px,
                     time_in_force=TimeInForce.GTC,
                     options=PlaceOrderOptions(post_only=True),

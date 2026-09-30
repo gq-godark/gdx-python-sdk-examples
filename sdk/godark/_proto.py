@@ -242,12 +242,12 @@ def build_place_order_proto(
     symbol_id: int,
     side: str,
     order_type: str,
-    quantity: float | None,
+    quantity: str | None,
     account: bytes,
-    price: float | None = None,
+    price: str | None = None,
     time_in_force: str = "GTC",
     aon: bool = False,
-    min_fill_size: float | None = None,
+    min_fill_size: str | None = None,
     expiry_time: int | None = None,
     correlation_id_bytes: bytes | None = None,
     options: PlaceOrderOptions | None = None,
@@ -325,9 +325,9 @@ def build_modify_order_proto(
     order_id: int,
     account: bytes,
     symbol_id: int,
-    new_price: float | None = None,
-    new_quantity: float | None = None,
-    new_trigger_price: float | None = None,
+    new_price: str | None = None,
+    new_quantity: str | None = None,
+    new_trigger_price: str | None = None,
     correlation_id_bytes: bytes = b"",
     scale: InstrumentDecimals | None = None,
 ) -> bytes:
@@ -442,8 +442,8 @@ def build_amend_tpsl_proto(
     order_id: int,
     correlation_id_bytes: bytes,
     *,
-    take_profit_price: float | None = None,
-    stop_loss_price: float | None = None,
+    take_profit_price: str | None = None,
+    stop_loss_price: str | None = None,
     symbol_id: int | None = None,
     position_side: str | Side | None = None,
     scale: InstrumentDecimals | None = None,
@@ -500,9 +500,10 @@ def build_mass_quote_proto(
 ) -> bytes:
     """Build a bare MassQuoteInput for HPKE sealing; return serialized bytes.
 
-    Each leg dict supports: ``side`` (str/Side), ``price`` (float), ``quantity``
-    (float), ``cancel_order_id`` (int|None, 0/None = pure place), ``time_in_force``
-    (str, default GTC), ``expiry_time`` (int|None), ``correlation_id`` (bytes|None).
+    Each leg dict supports: ``side`` (str/Side), ``price`` (decimal str),
+    ``quantity`` (decimal str), ``cancel_order_id`` (int|None, 0/None = pure
+    place), ``time_in_force`` (str, default GTC), ``expiry_time`` (int|None),
+    ``correlation_id`` (bytes|None).
 
     ``post_only`` is the batch-level flag: ``None`` encodes post-only (``True``);
     ``False`` enables the relaxed path where a crossing leg takes liquidity up
@@ -587,11 +588,11 @@ def build_batch_modify_proto(
     """Build a bare BatchModifyInput for HPKE sealing; return serialized bytes.
 
     Each leg dict supports: ``order_id`` (int, the resting order to amend),
-    ``new_price`` (float|None) and ``new_quantity`` (float|None) — at least one
-    must be set — and an optional ``correlation_id`` (bytes). Up to 20 legs per
-    request, single symbol. Amends are post-only: a leg whose amended order would
-    cross is rejected rather than taking liquidity, keeping the batch ~constant
-    online MPC rounds.
+    ``new_price`` (decimal str|None) and ``new_quantity`` (decimal str|None) —
+    at least one must be set — and an optional ``correlation_id`` (bytes). Up
+    to 20 legs per request, single symbol. Amends are post-only: a leg whose
+    amended order would cross is rejected rather than taking liquidity, keeping
+    the batch ~constant online MPC rounds.
 
     Raises ``ValueError`` if ``legs`` is empty, has more than 20 entries, or
     contains a leg with neither ``new_price`` nor ``new_quantity`` set (a no-op

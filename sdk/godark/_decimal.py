@@ -1,35 +1,52 @@
 """Decimal-string encode/decode for sealed order prices and sizes.
 
-Public SDK methods take/return floats; the sealed protobuf uses human decimal
-strings scaled to each instrument's ``price_decimals`` / ``quantity_decimals``.
+Public SDK trading methods take human decimal *strings* (e.g. ``"67500.0"``,
+``"0.001"``). The sealed protobuf uses the same decimal text, normalized to
+each instrument's ``price_decimals`` / ``quantity_decimals``.
 """
 
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 
+__all__ = ["format_decimal", "parse_decimal", "parse_decimal_required"]
 
-def format_decimal(value: float | int | str | Decimal, decimals: int) -> str:
-    """Format a public numeric value as a venue decimal string.
 
-    Rejects non-finite floats and values with more fractional digits than
-    ``decimals`` (never rounds). Pads with trailing zeros to exactly
-    ``decimals`` places when ``decimals > 0``.
+def format_decimal(value: str, decimals: int) -> str:
+    """Normalize a public decimal string for the wire.
+
+    Accepts only ``str`` decimal text (no ``float``/``int`` conversion). Rejects
+    empty input, non-decimal text, scientific notation, non-finite values,
+    negatives, and values with more fractional digits than ``decimals``
+    (never rounds). Pads with trailing zeros to exactly ``decimals`` places
+    when ``decimals > 0``.
     """
+    if not isinstance(value, str):
+        raise TypeError(f"decimal value must be str, got {type(value).__name__}")
     if decimals < 0:
         raise ValueError(f"decimals must be >= 0, got {decimals}")
-    if isinstance(value, float) and (
-        value != value or value in (float("inf"), float("-inf"))  # noqa: PLR0124
-    ):
-        raise ValueError(f"not a finite number: {value}")
+
+    s = value.strip()
+    if not s:
+        raise ValueError("empty decimal string")
+    if any(ch in s for ch in "eE"):
+        raise ValueError(f"scientific notation not allowed: {value!r}")
+    if s[0] in "+-":
+        raise ValueError(f"signed decimal not allowed: {value!r}")
+
     try:
-        d = value if isinstance(value, Decimal) else Decimal(str(value))
+        d = Decimal(s)
     except (InvalidOperation, ValueError) as exc:
         raise ValueError(f"not a decimal number: {value!r}") from exc
 
-    # Reject over-precise fractions without rounding.
-    _, _, exp = d.as_tuple()
-    frac_digits = -exp if isinstance(exp, int) and exp < 0 else 0
+    if not d.is_finite():
+        raise ValueError(f"not a finite number: {value!r}")
+    if d < 0:
+        raise ValueError(f"decimal value must be non-negative: {value!r}")
+
+    # Reject over-precise fractions without rounding (use the input text so
+    # trailing zeros in the caller's string count toward precision).
+    frac_digits = len(s.split(".", 1)[1]) if "." in s else 0
     if frac_digits > decimals:
         raise ValueError(f"value {value!r} has more than {decimals} decimal places")
 
@@ -42,26 +59,27 @@ def format_decimal(value: float | int | str | Decimal, decimals: int) -> str:
     return format(q, "f")
 
 
-def parse_decimal(value: str | float | int | Decimal | None) -> float | None:
-    """Decode a wire decimal string (or numeric) back to a public float."""
+def parse_decimal(value: str | None) -> str | None:
+    """Validate a wire decimal string and return the trimmed text (or None)."""
     if value is None:
         return None
-    if isinstance(value, bool):
-        raise ValueError(f"not a decimal number: {value!r}")
-    if isinstance(value, int | float):
-        return float(value)
-    if isinstance(value, Decimal):
-        return float(value)
-    s = str(value).strip()
+    if not isinstance(value, str):
+        raise TypeError(f"decimal value must be str, got {type(value).__name__}")
+    s = value.strip()
     if not s:
         return None
+    # Reuse format_decimal's validation with a permissive scale so callers get
+    # a clear error for garbage; do not re-pad here.
     try:
-        return float(Decimal(s))
+        d = Decimal(s)
     except (InvalidOperation, ValueError) as exc:
         raise ValueError(f"not a decimal number: {value!r}") from exc
+    if not d.is_finite():
+        raise ValueError(f"not a finite number: {value!r}")
+    return s
 
 
-def parse_decimal_required(value: str | float | int | Decimal) -> float:
+def parse_decimal_required(value: str) -> str:
     """Like :func:`parse_decimal` but empty/None raises."""
     out = parse_decimal(value)
     if out is None:

@@ -5,21 +5,22 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from decimal import Decimal
 
 from dotenv import get_first, load_dotenv
 from godark import GodarkRestClient
 
 
-def _live_price() -> float:
+def _live_price() -> str:
     raw = get_first("GDX_LIVE_PRICE", "GODARK_LIVE_PRICE")
     if raw:
-        return float(raw)
-    return 78000.0
+        return raw.strip()
+    return "78000.0"
 
 
-def _rest_limit_price() -> float:
+def _rest_limit_price() -> str:
     """BUY limit well below touch so place/modify/cancel stay in the book."""
-    return _live_price() - 5000.0
+    return format(Decimal(_live_price()) - Decimal("5000"), "f")
 
 
 async def main() -> int:
@@ -73,7 +74,7 @@ async def main() -> int:
             "BTC-USDC-PERP",
             "BUY",
             type="LIMIT",
-            quantity=0.01,
+            quantity="0.01",
             price=price,
             client_order_id="sdk-python-rest-demo",
         )
@@ -83,7 +84,7 @@ async def main() -> int:
         modify_ack = await client.modify_order(
             ack.order_id,
             "BTC-USDC-PERP",
-            new_price=price - 64,
+            new_price=format(Decimal(price) - Decimal("64"), "f"),
         )
         print("modified", modify_ack)
 

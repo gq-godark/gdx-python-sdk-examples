@@ -550,13 +550,13 @@ class GodarkRestClient:
         symbol: str,
         side: str | Side,
         *,
-        quantity: float,
+        quantity: str,
         type: str | OrderType | None = None,
         order_type: str | OrderType | None = None,
-        price: float | None = None,
+        price: str | None = None,
         time_in_force: str | TimeInForce = "GTC",
         aon: bool = False,
-        min_fill_size: float | None = None,
+        min_fill_size: str | None = None,
         expiry_time: int | None = None,
         client_order_id: str | None = None,
     ) -> OrderAck:
@@ -673,9 +673,9 @@ class GodarkRestClient:
         order_id: str,
         symbol: str = "BTC-USDC-PERP",
         *,
-        new_price: float | None = None,
-        new_quantity: float | None = None,
-        new_trigger_price: float | None = None,
+        new_price: str | None = None,
+        new_quantity: str | None = None,
+        new_trigger_price: str | None = None,
     ) -> OrderAck:
         symbol_id = self._resolve_symbol(symbol)
         corr_id = _new_correlation_id()
