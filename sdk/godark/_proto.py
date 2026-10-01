@@ -21,6 +21,7 @@ from ._symbols import InstrumentDecimals  # noqa: E402
 from .enums import (  # noqa: E402
     _CANCEL_REASON_FROM_PROTO,
     _ORDER_STATUS_FROM_PROTO,
+    _ORDER_TYPE_FROM_PROTO,
     _ORDER_TYPE_TO_PROTO,
     _ORDER_UPDATE_TYPE_FROM_PROTO,
     _REQUEST_TYPE_TO_PROTO,
@@ -1013,6 +1014,18 @@ def parse_open_orders_snapshot_proto(msg: sequencer_pb2.OpenOrdersSnapshot) -> O
             price=str(r.price) if r.price else "",
             quantity=str(r.quantity) if r.quantity else "",
             remaining_qty=str(r.remaining_qty) if r.remaining_qty else "",
+            filled_qty=str(r.filled_qty) if r.filled_qty else "",
+            status=(
+                _ORDER_STATUS_FROM_PROTO[r.order_status].value
+                if r.order_status in _ORDER_STATUS_FROM_PROTO
+                else ""
+            ),
+            side=_SIDE_FROM_PROTO[r.side].value if r.side in _SIDE_FROM_PROTO else "",
+            order_type=(
+                _ORDER_TYPE_FROM_PROTO[r.order_type].value
+                if r.order_type in _ORDER_TYPE_FROM_PROTO
+                else ""
+            ),
         )
         for r in msg.rows
     )

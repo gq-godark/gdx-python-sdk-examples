@@ -316,6 +316,10 @@ class OpenOrderRow:
     price: str = ""
     quantity: str = ""
     remaining_qty: str = ""
+    filled_qty: str = ""
+    status: str = ""
+    side: str = ""
+    order_type: str = ""
 
 
 @dataclass(frozen=True)

@@ -10,6 +10,8 @@ import time
 import uuid
 from typing import Any, Literal
 
+import httpx
+
 from . import _proto
 from ._access_token import account_from_access_token_jwt
 from ._hpke import SealedSession, nonce_from_u64, pinned_sequencer_static_pub
@@ -111,6 +113,40 @@ def _correlation_id_header_hex(correlation_id: bytes) -> str:
     return f"{value:032x}" if value else ""
 
 
+def _correlation_id_decimal(correlation_id: bytes) -> str:
+    """Decimal u128 matching the place header the edge armed."""
+    if len(correlation_id) != 16:
+        return ""
+    value = int.from_bytes(correlation_id, "big")
+    return str(value) if value else ""
+
+
+_TERMINAL_ORDER_STATUSES = frozenset({"FILLED", "CANCELLED", "REJECTED"})
+
+_STATUS_ALIASES = {
+    "NEW": "NEW",
+    "OPEN": "NEW",
+    "PARTIALLY_FILLED": "PARTIALLY_FILLED",
+    "PARTIALLYFILLED": "PARTIALLY_FILLED",
+    "FILLED": "FILLED",
+    "CANCELLED": "CANCELLED",
+    "CANCELED": "CANCELLED",
+    "REJECTED": "REJECTED",
+}
+
+
+def _normalize_order_status(value: Any) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "value"):
+        value = value.value
+    text = str(value).strip()
+    if not text:
+        return ""
+    key = text.upper().replace("-", "_").replace(" ", "_")
+    return _STATUS_ALIASES.get(key, key)
+
+
 class GodarkRestClient:
     """
     REST client for API-key auth, encrypted trading, and trading read endpoints.
@@ -180,6 +216,8 @@ class GodarkRestClient:
         self._hpke_pin_hex = _resolve_hpke_static_public_key_hex(hpke_static_public_key_hex, env)
         self._next_request_id = 1
         self._local_coid_index: dict[str, str] = {}
+        # Status learned from decrypted acks / open-order snapshots / history.
+        self._order_status_cache: dict[str, str] = {}
 
     @property
     def bearer_token(self) -> str | None:
@@ -436,8 +474,12 @@ class GodarkRestClient:
                 ack_dict.get("reject_text") or "order rejected",
                 error_code=str(ack_dict.get("error_code", "")) or None,
             )
+        order_id = str(ack_dict.get("order_id", ""))
+        status = _normalize_order_status(ack_dict.get("order_status"))
+        if order_id and status:
+            self._remember_order_status(order_id, status)
         return OrderAck(
-            order_id=str(ack_dict.get("order_id", "")),
+            order_id=order_id,
             success=True,
             sequence=str(ack_dict.get("sequence", "")),
         )
@@ -609,6 +651,7 @@ class GodarkRestClient:
                     bearer=self._bearer,
                     client_order_id=client_order_id,
                     order_id=str(ack.order_id),
+                    correlation_id=_correlation_id_decimal(corr_id),
                 )
             except Exception as e:  # noqa: BLE001 — registration is best-effort
                 _LOG.warning(
@@ -629,7 +672,7 @@ class GodarkRestClient:
             symbol_id=symbol_id,
             correlation_id_bytes=corr_id,
         )
-        return await self._send_encrypted(
+        ack = await self._send_encrypted(
             "cancel",
             symbol_id,
             plaintext,
@@ -637,6 +680,11 @@ class GodarkRestClient:
             route="delete",
             order_id=str(order_id),
         )
+        if ack.success:
+            # A successful cancel ack is terminal. GET /orders/{id} then returns
+            # 403 for ids that are no longer working.
+            self._remember_order_status(str(order_id), "CANCELLED")
+        return ack
 
     async def cancel_order_by_client_id(
         self, client_order_id: str, symbol: str = "BTC-USDC-PERP"
@@ -698,18 +746,123 @@ class GodarkRestClient:
             order_id=str(order_id),
         )
 
+    def _remember_order_status(self, order_id: str, status: str) -> None:
+        normalized = _normalize_order_status(status)
+        if order_id and normalized:
+            self._order_status_cache[str(order_id)] = normalized
+
+    def _order_view_from_row(self, raw: dict[str, Any], row: Any) -> dict[str, Any]:
+        """Merge a decrypted open-order row onto the REST pointer."""
+        view = dict(raw)
+        view["order_id"] = str(row.order_id)
+        view["symbol_id"] = row.symbol_id
+        view["status"] = _normalize_order_status(row.status)
+        view["price"] = row.price
+        view["quantity"] = row.quantity
+        view["remaining_qty"] = row.remaining_qty
+        view["filled_qty"] = row.filled_qty
+        view["leverage"] = row.leverage
+        if row.side:
+            view["side"] = row.side
+        if row.order_type:
+            view["order_type"] = row.order_type
+        return view
+
+    async def _history_status(self, order_id: str) -> str:
+        if not self._bearer:
+            return ""
+        try:
+            page = await self._http.get_order_history(bearer=self._bearer, limit=50)
+        except Exception as exc:  # noqa: BLE001 — history is a terminal-status fallback
+            _LOG.debug("order history lookup failed for %s: %s", order_id, exc)
+            return ""
+        rows = page.get("rows") if isinstance(page, dict) else None
+        if not isinstance(rows, list):
+            return ""
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("order_id", "")) != str(order_id):
+                continue
+            return _normalize_order_status(row.get("terminal_status") or row.get("status"))
+        return ""
+
+    async def _with_decrypted_status(self, raw: dict[str, Any], *, order_id: str) -> dict[str, Any]:
+        """Fill ``status`` for a Zone-A ``{encrypted, hint, order_id}`` pointer.
+
+        The edge does not put order state on GET. Status comes from the same
+        encrypted open-orders read used by :meth:`get_open_orders`, then from a
+        decrypted ack cache, then from terminal history.
+        """
+        oid = str(raw.get("order_id") or order_id or "")
+        existing = _normalize_order_status(raw.get("status") or raw.get("order_status"))
+        if existing:
+            if oid:
+                self._remember_order_status(oid, existing)
+            if existing != raw.get("status"):
+                merged = dict(raw)
+                merged["status"] = existing
+                return merged
+            return raw
+        if not raw.get("encrypted") and not raw.get("encrypted_body") and not raw.get("ciphertext"):
+            return raw
+
+        if oid:
+            try:
+                snap = await self.get_open_orders()
+            except Exception as exc:  # noqa: BLE001 — fall through to cache / history
+                _LOG.debug("open-orders decrypt failed while reading %s: %s", oid, exc)
+                snap = None
+            if snap is not None:
+                for row in snap.rows:
+                    if str(row.order_id) == oid and row.status:
+                        view = self._order_view_from_row(raw, row)
+                        self._remember_order_status(oid, view["status"])
+                        return view
+
+        cached = _normalize_order_status(self._order_status_cache.get(oid, ""))
+        if cached in _TERMINAL_ORDER_STATUSES:
+            view = dict(raw)
+            view["order_id"] = oid
+            view["status"] = cached
+            return view
+
+        historic = await self._history_status(oid) if oid else ""
+        if historic:
+            self._remember_order_status(oid, historic)
+            view = dict(raw)
+            view["order_id"] = oid
+            view["status"] = historic
+            return view
+        return raw
+
     async def get_order(self, order_id: str) -> dict[str, Any]:
         if not self._bearer:
             raise SessionError("not authenticated – call connect() first")
-        return await self._http.get_order(bearer=self._bearer, order_id=order_id)
+        try:
+            raw = await self._http.get_order(bearer=self._bearer, order_id=order_id)
+        except httpx.HTTPStatusError as exc:
+            # Terminal and unknown ids are 403. Keep polling via the decrypted
+            # book, the cancel-ack cache, and order history.
+            if exc.response.status_code not in (403, 404):
+                raise
+            raw = {"encrypted": True, "order_id": str(order_id)}
+        return await self._with_decrypted_status(raw, order_id=str(order_id))
 
     async def get_order_by_client_id(self, client_order_id: str) -> dict[str, Any]:
         if not self._bearer:
             raise SessionError("not authenticated – call connect() first")
-        return await self._http.get_order_by_client_order_id(
+        local = self._local_coid_index.get(client_order_id)
+        if local:
+            row = await self.get_order(local)
+            row = dict(row)
+            row.setdefault("client_order_id", client_order_id)
+            return row
+        raw = await self._http.get_order_by_client_order_id(
             bearer=self._bearer,
             client_order_id=client_order_id,
         )
+        return await self._with_decrypted_status(raw, order_id=str(raw.get("order_id") or ""))
 
     async def await_terminal_status(
         self,
@@ -719,11 +872,10 @@ class GodarkRestClient:
         poll_interval_sec: float = 0.25,
     ) -> dict[str, Any]:
         deadline = asyncio.get_event_loop().time() + timeout_sec
-        terminal = {"FILLED", "CANCELLED", "REJECTED"}
         while asyncio.get_event_loop().time() < deadline:
             row = await self.get_order(order_id)
-            st = str(row.get("status", "")).upper()
-            if st in terminal:
+            st = _normalize_order_status(row.get("status"))
+            if st in _TERMINAL_ORDER_STATUSES:
                 return row
             await asyncio.sleep(poll_interval_sec)
         raise TimeoutError(f"order {order_id} did not reach terminal status within {timeout_sec}s")

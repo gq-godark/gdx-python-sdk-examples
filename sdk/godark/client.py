@@ -408,6 +408,12 @@ class GodarkClient:
         self._funding_rate_queue: asyncio.Queue[FundingRateUpdate] = asyncio.Queue(
             maxsize=stream_buffer_size
         )
+        self._volume_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(
+            maxsize=stream_buffer_size
+        )
+        self._open_interest_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(
+            maxsize=stream_buffer_size
+        )
         self._open_orders_snapshot_queue: asyncio.Queue[OpenOrdersSnapshot] = asyncio.Queue(
             maxsize=stream_buffer_size
         )
@@ -424,6 +430,8 @@ class GodarkClient:
         self._balance_callbacks: list[Callable[[BalanceUpdate], None]] = []
         self._margin_alert_callbacks: list[Callable[[MarginAlert], None]] = []
         self._funding_rate_callbacks: list[Callable[[FundingRateUpdate], None]] = []
+        self._volume_callbacks: list[Callable[[dict[str, Any]], None]] = []
+        self._open_interest_callbacks: list[Callable[[dict[str, Any]], None]] = []
         self._open_orders_snapshot_callbacks: list[Callable[[OpenOrdersSnapshot], None]] = []
         self._settlement_callbacks: list[Callable[[SettlementUpdate], None]] = []
         self._leverage_settings_callbacks: list[Callable[[LeverageSettings], None]] = []
@@ -992,6 +1000,21 @@ class GodarkClient:
         """
         self._funding_rate_callbacks.append(callback)
 
+    def on_volume_snapshot(self, callback: Callable[[dict[str, Any]], None]) -> None:
+        """Register for public ``volume_snapshot`` pushes.
+
+        Delivered when ``volume`` is subscribed, including the snapshot embedded
+        in the subscribe ack. Subscribe with ``await client.subscribe([..., "volume"])``.
+        """
+        self._volume_callbacks.append(callback)
+
+    def on_open_interest_snapshot(self, callback: Callable[[dict[str, Any]], None]) -> None:
+        """Register for public ``open_interest_snapshot`` pushes.
+
+        Subscribe with ``await client.subscribe([..., "open_interest"])``.
+        """
+        self._open_interest_callbacks.append(callback)
+
     def on_open_orders_snapshot(self, callback: Callable[[OpenOrdersSnapshot], None]) -> None:
         """Register for open-order book hydration batches."""
         self._open_orders_snapshot_callbacks.append(callback)
@@ -1009,6 +1032,11 @@ class GodarkClient:
         async for u in self._queue_iter(self._positions_snapshot_queue):
             yield u
 
+    async def open_orders_snapshots(self) -> AsyncIterator[OpenOrdersSnapshot]:
+        """Iterate open-order book hydration batches."""
+        async for u in self._queue_iter(self._open_orders_snapshot_queue):
+            yield u
+
     async def system_health_updates(self) -> AsyncIterator[SystemHealthUpdate]:
         async for u in self._queue_iter(self._system_health_queue):
             yield u
@@ -1023,6 +1051,16 @@ class GodarkClient:
 
     async def funding_rate_updates(self) -> AsyncIterator[FundingRateUpdate]:
         async for u in self._queue_iter(self._funding_rate_queue):
+            yield u
+
+    async def volume_snapshots(self) -> AsyncIterator[dict[str, Any]]:
+        """Iterate public ``volume_snapshot`` messages."""
+        async for u in self._queue_iter(self._volume_queue):
+            yield u
+
+    async def open_interest_snapshots(self) -> AsyncIterator[dict[str, Any]]:
+        """Iterate public ``open_interest_snapshot`` messages."""
+        async for u in self._queue_iter(self._open_interest_queue):
             yield u
 
     async def settlement_updates(self) -> AsyncIterator[SettlementUpdate]:
@@ -1434,6 +1472,19 @@ class GodarkClient:
     # ------------------------------------------------------------------
 
     def _handle_public_message(self, msg: dict) -> None:
+        typ = msg.get("type")
+        if typ == "volume_snapshot":
+            self._bounded_put(self._volume_queue, msg)
+            for cb in self._volume_callbacks:
+                with contextlib.suppress(Exception):
+                    cb(msg)
+            return
+        if typ == "open_interest_snapshot":
+            self._bounded_put(self._open_interest_queue, msg)
+            for cb in self._open_interest_callbacks:
+                with contextlib.suppress(Exception):
+                    cb(msg)
+            return
         for update in _proto.parse_funding_rate_snapshot_json(msg):
             self._dispatch_funding_rate_update(update)
 
