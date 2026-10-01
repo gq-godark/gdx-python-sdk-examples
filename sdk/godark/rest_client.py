@@ -602,7 +602,13 @@ class GodarkRestClient:
         expiry_time: int | None = None,
         client_order_id: str | None = None,
     ) -> OrderAck:
-        """Place order. Accept docs alias ``type=`` or ``order_type=``."""
+        """Place order. Accept docs alias ``type=`` or ``order_type=``.
+
+        ``client_order_id`` may be sent on the REST body, but a REST place does
+        not arm a place correlation, so this method does not call
+        ``POST /orders/_register_coid`` and does not cache the id. Server-side
+        client-order lookup follows a successful WebSocket place.
+        """
         ot = type if type is not None else order_type
         if ot is None:
             raise ValueError("provide type= or order_type=")
@@ -629,39 +635,13 @@ class GodarkRestClient:
             scale=self._resolve_scale(symbol),
         )
 
-        ack = await self._send_encrypted_order(
+        return await self._send_encrypted_order(
             "place",
             symbol_id,
             plaintext,
             corr_id,
             client_order_id=client_order_id,
         )
-
-        # After local decrypt of the ack we know the assigned order_id. Two things:
-        # 1. Cache it in our local coid index so cancel_order_by_client_id can encrypt
-        #    with the real order_id (sequencer requires the real id inside the ciphertext).
-        # 2. Push the cleartext routing mapping back to the edge so other clients
-        #    (and edge-side ?client_order_id= resolution) work too. Best-effort.
-        if client_order_id and ack.success and ack.order_id:
-            self._local_coid_index[client_order_id] = str(ack.order_id)
-            try:
-                if not self._bearer:
-                    raise SessionError("not authenticated – call connect() first")
-                await self._http.register_client_order_mapping(
-                    bearer=self._bearer,
-                    client_order_id=client_order_id,
-                    order_id=str(ack.order_id),
-                    correlation_id=_correlation_id_decimal(corr_id),
-                )
-            except Exception as e:  # noqa: BLE001 — registration is best-effort
-                _LOG.warning(
-                    "register_client_order_mapping failed for coid=%s order_id=%s: %s",
-                    client_order_id,
-                    ack.order_id,
-                    e,
-                )
-
-        return ack
 
     async def cancel_order(self, order_id: str, symbol: str = "BTC-USDC-PERP") -> OrderAck:
         symbol_id = self._resolve_symbol(symbol)
@@ -691,29 +671,23 @@ class GodarkRestClient:
     ) -> OrderAck:
         """Cancel by client-supplied idempotency key.
 
-        Resolution order (Zone A: SDK is the only party that decrypted the place ACK
-        and therefore knows the real ``order_id`` for this ``client_order_id``):
-
-        1. Local in-memory index populated by :meth:`place_order`.
-        2. Edge-side ``GET /api/v1/orders?client_order_id=`` (returns the routing key).
-        3. Otherwise raise — SDK cannot encrypt a cancel with a sentinel id since the
-           sequencer matches against the real id inside the ciphertext.
+        The sequencer id comes from ``GET /api/v1/orders?client_order_id=``.
+        The in-memory index is not a substitute for that lookup. It is updated
+        only after the edge returns the mapping.
         """
-        order_id = self._local_coid_index.get(client_order_id)
-        if order_id is None:
-            if not self._bearer:
-                raise SessionError("not authenticated – call connect() first")
-            try:
-                row = await self._http.get_order_by_client_order_id(
-                    bearer=self._bearer,
-                    client_order_id=client_order_id,
-                )
-                order_id = str(row.get("order_id") or "")
-            except RestEnvelopeError:
-                order_id = ""
-            if not order_id:
-                raise OrderError(f"unknown client_order_id: {client_order_id}")
-            self._local_coid_index[client_order_id] = order_id
+        if not self._bearer:
+            raise SessionError("not authenticated – call connect() first")
+        try:
+            row = await self._http.get_order_by_client_order_id(
+                bearer=self._bearer,
+                client_order_id=client_order_id,
+            )
+            order_id = str(row.get("order_id") or "")
+        except RestEnvelopeError:
+            order_id = ""
+        if not order_id:
+            raise OrderError(f"unknown client_order_id: {client_order_id}")
+        self._local_coid_index[client_order_id] = order_id
         return await self.cancel_order(order_id, symbol=symbol)
 
     async def modify_order(
@@ -852,17 +826,17 @@ class GodarkRestClient:
     async def get_order_by_client_id(self, client_order_id: str) -> dict[str, Any]:
         if not self._bearer:
             raise SessionError("not authenticated – call connect() first")
-        local = self._local_coid_index.get(client_order_id)
-        if local:
-            row = await self.get_order(local)
-            row = dict(row)
-            row.setdefault("client_order_id", client_order_id)
-            return row
         raw = await self._http.get_order_by_client_order_id(
             bearer=self._bearer,
             client_order_id=client_order_id,
         )
-        return await self._with_decrypted_status(raw, order_id=str(raw.get("order_id") or ""))
+        order_id = str(raw.get("order_id") or "")
+        if order_id:
+            self._local_coid_index[client_order_id] = order_id
+        view = await self._with_decrypted_status(raw, order_id=order_id)
+        view = dict(view)
+        view.setdefault("client_order_id", client_order_id)
+        return view
 
     async def await_terminal_status(
         self,

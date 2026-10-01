@@ -440,6 +440,8 @@ class GodarkClient:
         self._place_outcome_waiters: list[dict[str, Any]] = []
         self._recent_terminal_updates: list[OrderUpdate] = []
         self._pending_encrypted_by_nonce: dict[int, dict] = {}
+        # Filled only after POST /orders/_register_coid returns HTTP 200.
+        self._local_coid_index: dict[str, str] = {}
 
         self._reconnect_task: asyncio.Task | None = None
         self._reconnect_attempts = 0
@@ -594,12 +596,20 @@ class GodarkClient:
         expiry_time: int | None = None,
         confirmation: Literal["ack", "book"] = "book",
         options: PlaceOrderOptions | None = None,
+        client_order_id: str | None = None,
     ) -> OrderAck:
         """Place an order with explicit acknowledgement or book confirmation.
 
         ``confirmation="ack"`` returns as soon as the sequencer acknowledges the
         request. ``confirmation="book"`` (the default) waits for the subsequent
         OPEN, REJECTED, FILLED, PARTIALLY_FILLED, or CANCELLED order update.
+
+        When ``client_order_id`` is set, a successful place is followed by
+        ``POST /api/v1/orders/_register_coid``. The edge only accepts that
+        mapping for a WebSocket place, which arms the header correlation.
+        ``correlation_id`` is the decimal u128 of that same header id, and
+        ``order_id`` is the decimal sequencer id. A non-2xx response, including
+        400, is raised. The in-memory coid cache is written only after HTTP 200.
         """
         if confirmation not in ("ack", "book"):
             raise ValueError("confirmation must be 'ack' or 'book'")
@@ -634,12 +644,43 @@ class GodarkClient:
             self._cancel_place_outcome_waiter(waiter)
             raise
 
-        if waiter is None:
-            return ack
-        update = await self._await_place_outcome(ack.order_id, waiter)
-        if update.update_type == OrderUpdateType.REJECTED or update.status == OrderStatus.REJECTED:
-            raise make_order_error_from_json(update.msg, update.reject_reason)
+        if waiter is not None:
+            update = await self._await_place_outcome(ack.order_id, waiter)
+            if (
+                update.update_type == OrderUpdateType.REJECTED
+                or update.status == OrderStatus.REJECTED
+            ):
+                raise make_order_error_from_json(update.msg, update.reject_reason)
+        if client_order_id and str(client_order_id).strip() and ack.success and ack.order_id:
+            await self._register_client_order_id(str(client_order_id), str(ack.order_id), corr_id)
         return ack
+
+    async def _register_client_order_id(
+        self, client_order_id: str, order_id: str, correlation_id: bytes
+    ) -> None:
+        """Push the cleartext coid map. Cache it only when the edge stores it."""
+        from ._rest_transport import RestTransport
+        from .rest_client import _correlation_id_decimal, _ws_origin_to_http_rest
+
+        corr = _correlation_id_decimal(correlation_id)
+        if not corr:
+            raise OrderError("place correlation_id missing; cannot register client_order_id")
+        if not self._auth_token:
+            raise SessionError("not authenticated")
+        order_id_dec = str(order_id).strip()
+        if not order_id_dec.isdecimal():
+            raise OrderError("order_id must be a decimal string to register client_order_id")
+        http = RestTransport(_ws_origin_to_http_rest(self._base_url))
+        try:
+            await http.register_client_order_mapping(
+                bearer=self._auth_token,
+                client_order_id=client_order_id,
+                order_id=order_id_dec,
+                correlation_id=corr,
+            )
+        finally:
+            await http.aclose()
+        self._local_coid_index[client_order_id] = order_id_dec
 
     async def cancel_order(self, order_id: str, symbol: str = "BTC-USDC-PERP") -> OrderAck:
         """Cancel an order by ID."""
