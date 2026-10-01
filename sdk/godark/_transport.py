@@ -21,6 +21,10 @@ from .errors import TimeoutError as GdxTimeoutError
 
 logger = logging.getLogger("godark.transport")
 
+_PUBLIC_SNAPSHOT_TYPES = frozenset(
+    {"funding_rate_snapshot", "volume_snapshot", "open_interest_snapshot"}
+)
+
 
 def _is_docs_reply(msg: dict[str, Any]) -> bool:
     if msg.get("type") is not None:
@@ -52,11 +56,11 @@ def _normalize_inbound_message(msg: dict[str, Any]) -> dict[str, Any]:
                 "error": err_text or "authentication failed",
             }
         if isinstance(data, dict):
-            uid = data.get("user_uuid")
+            account = data.get("account")
             return {
                 "type": "auth_result",
                 "success": True,
-                "user_uuid": uid,
+                "account": account,
                 "conn_id": data.get("conn_id"),
                 "account_id": data.get("account_id"),
                 "session_id": data.get("session_id"),
@@ -99,8 +103,17 @@ def _normalize_inbound_message(msg: dict[str, Any]) -> dict[str, Any]:
                 "message": err_text or "channel error",
                 "channel": ch,
             }
-        if isinstance(data, dict) and "channel" in data:
-            return {"event": op, "channel": data["channel"]}
+        if isinstance(data, dict):
+            # Initial public snapshots ride the subscribe ack as data.type.
+            # Keep the payload so dispatch can deliver it; the channel ack is
+            # a separate frame and is what completes the subscribe waiter.
+            typ = data.get("type")
+            if typ in _PUBLIC_SNAPSHOT_TYPES:
+                lifted = dict(data)
+                lifted["type"] = typ
+                return lifted
+            if "channel" in data:
+                return {"event": op, "channel": data["channel"]}
         return {"event": op}
 
     if op == "logout":
@@ -816,9 +829,14 @@ class EdgeTransport:
                     self._sub_waiter.set_result(None)
             return
 
-        if event == "error":
+        # Unknown channels arrive as a type-tagged error push (parse failure),
+        # not as an event-tagged subscribe ack. Fail the waiter immediately.
+        if event == "error" or (
+            msg_type == "error" and self._sub_waiter is not None and not self._sub_waiter.done()
+        ):
             if self._sub_waiter and not self._sub_waiter.done():
-                self._sub_waiter.set_exception(RuntimeError(msg.get("message", "channel error")))
+                text = msg.get("message") or msg.get("error") or "channel error"
+                self._sub_waiter.set_exception(RuntimeError(str(text)))
             return
 
         # ack / error responses for commands (routed by correlation id when

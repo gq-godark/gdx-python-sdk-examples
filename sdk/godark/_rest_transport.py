@@ -193,15 +193,39 @@ class RestTransport:
         bearer: str,
         client_order_id: str,
         order_id: str,
+        correlation_id: str,
     ) -> dict[str, Any]:
-        """``POST /api/v1/orders/_register_coid`` — push (coid, order_id) mapping post-decrypt."""
+        """``POST /api/v1/orders/_register_coid`` — push (coid, order_id) mapping post-decrypt.
+
+        ``correlation_id`` is the place-header u128 as a non-zero decimal string.
+        The edge rejects the mapping without it.
+        """
         r = await self._client.post(
             "/api/v1/orders/_register_coid",
-            json={"client_order_id": client_order_id, "order_id": order_id},
+            json={
+                "client_order_id": client_order_id,
+                "order_id": order_id,
+                "correlation_id": correlation_id,
+            },
             headers={"Authorization": f"Bearer {bearer}"},
         )
         r.raise_for_status()
         return _unwrap(r.json())
+
+    async def get_order_history(self, *, bearer: str, limit: int = 50) -> dict[str, Any]:
+        """``GET /api/v1/orders/history`` — terminal rows (plaintext after edge decrypt)."""
+        r = await self._client.get(
+            "/api/v1/orders/history",
+            params={"limit": limit},
+            headers={"Authorization": f"Bearer {bearer}"},
+        )
+        r.raise_for_status()
+        data = r.json()
+        if isinstance(data, dict) and isinstance(data.get("data"), dict):
+            data = data["data"]
+        if not isinstance(data, dict):
+            raise RestEnvelopeError(1500, "expected order history object", None)
+        return data
 
     async def revoke_token(self, *, bearer: str) -> dict[str, Any]:
         r = await self._client.post(
