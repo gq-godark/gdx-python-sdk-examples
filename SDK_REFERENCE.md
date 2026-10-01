@@ -41,6 +41,13 @@ asyncio.run(main())
 
 `base_url=` may omit the `/ws/v1` suffix — the SDK appends it.
 
+`connect()` exchanges the API key for a REST `client_credentials` access token
+(`POST /auth/token`) and sends that token on WebSocket `op: login`. The login
+frame is not `key:secret:passphrase`.
+
+`/ws/v1` subscribe channels are `orders`, `positions`, `volume`,
+`open_interest`, and `funding_rate`. Trades and L2 are not on this socket.
+
 ## Configuration
 
 The MM examples expect:
@@ -93,7 +100,7 @@ coercion before seal.
 
 | Method | Signature | Purpose |
 |--------|-----------|---------|
-| `place_order` | `async def place_order(symbol, side, order_type, quantity=None, price=None, time_in_force="GTC", aon=False, min_fill_size=None, expiry_time=None, confirmation="book", options=None) -> OrderAck` | Place encrypted order; raises `OrderError` on rejection |
+| `place_order` | `async def place_order(symbol, side, order_type, quantity=None, price=None, time_in_force="GTC", aon=False, min_fill_size=None, expiry_time=None, confirmation="book", options=None, client_order_id=None) -> OrderAck` | Place encrypted order; raises `OrderError` on rejection |
 | `update_leverage` | `async def update_leverage(symbol: str, leverage: int) -> OrderAck` | Set per-symbol account leverage (place/mass_quote inherit this) |
 | `cancel_order` | `async def cancel_order(order_id: str, symbol: str = "BTC-USDC-PERP") -> OrderAck` | Cancel by numeric id (passed as string) |
 | `modify_order` | `async def modify_order(order_id: str, symbol="BTC-USDC-PERP", new_price=None, new_quantity=None, new_trigger_price=None) -> OrderAck` | Amend price, quantity, and/or stop trigger |
@@ -104,16 +111,23 @@ coercion before seal.
 as an integer internally — pass `str(ack.order_id)` rather than the dataclass
 field bare if you re-stringify it.
 
+A `client_order_id` is registered only after a successful WebSocket place
+(`POST /api/v1/orders/_register_coid`). A REST place does not register it.
+Lookup uses the edge mapping from that WebSocket registration. A process-local
+dict is not the registration path.
+
+`slippage_bps` is accepted only on `MARKET` and `STOP_MARKET`. `PEG` is not
+post-only; do not set `post_only` on a pegged order.
+
 ### Streams (subscribe / unsubscribe)
 
 | Method | Signature | Purpose |
 |--------|-----------|---------|
-| `subscribe` | `async def subscribe(channels=("orders", "positions")) -> None` | Subscribe to private push channels |
+| `subscribe` | `async def subscribe(channels=("orders", "positions")) -> None` | Subscribe to `/ws/v1` channels |
 | `unsubscribe` | `async def unsubscribe(channels=("orders", "positions")) -> None` | Unsubscribe a subset |
 
-Exact channel strings match the docs wire `{channel: …}` payloads; subscribe
-according to upstream edge documentation when enabling additional sequencer
-streams.
+Channel names on `/ws/v1`: `orders`, `positions`, `volume`, `open_interest`,
+`funding_rate`. This socket does not carry trades or L2.
 
 ### Callbacks
 
@@ -275,7 +289,7 @@ name (e.g. `Side.SELL == "SELL"`, `str(OrderType.LIMIT) == "OrderType.LIMIT"`,
 - `PositionsSnapshotSource`: `UNSPECIFIED`, `INITIAL`, `PERIODIC`, `EVENT`
 - `SettlementBatchStatus`: `UNSPECIFIED`, `SUBMITTED`, `CONFIRMED`, `FAILED`
 
-`PlaceOrderOptions` (`options` on `place_order`) includes `reduce_only`, `post_only`, `stp_mode`, `peg_offset_bps`, `trigger_price`, `take_profit_price`, `stop_loss_price`, `slippage_bps`, and `quote_notional`. Omit `slippage_bps` to use the venue max walk cap (localnet 5%); typical explicit values are 50–500 bps (0.5%–5%). Use `quote_notional` instead of `quantity` for quote-sized orders; exactly one size intent is required. `PEG` pegs to the Pyth oracle mark.
+`PlaceOrderOptions` (`options` on `place_order`) includes `reduce_only`, `post_only`, `stp_mode`, `peg_offset_bps`, `trigger_price`, `take_profit_price`, `stop_loss_price`, `slippage_bps`, and `quote_notional`. `trigger_price`, `take_profit_price`, `stop_loss_price`, and `quote_notional` are decimal strings; `int` / `float` / `bool` raise `TypeError`. `slippage_bps` applies only to `MARKET` and `STOP_MARKET` (integer basis points). Omit it to use the venue max walk cap. Use `quote_notional` instead of `quantity` for quote-sized orders; exactly one size intent is required. `PEG` pegs to the Pyth oracle mark and is not a post-only order.
 
 ## Errors
 
@@ -379,7 +393,25 @@ REST operations:
 - Public reads (no `connect()` required): `get_funding_rates()`,
   `get_open_interest()`, and `get_volume()`
 
+Construct with `rest_base_url=` (not `base_url=`). `connect()` is
+`client_credentials` and stores the access token. `place_order` is
+keyword-only after `side`:
+
+```python
+await client.place_order(
+    "BTC-USDC-PERP",
+    "BUY",
+    type="LIMIT",
+    quantity="0.01",
+    price="73000.0",
+)
+```
+
+Passing `client_order_id` on this call does not register it. Registration
+happens only after a successful WebSocket place.
+
 After `connect()`, `account` and `account_str` expose the canonical base58
 account. The constructor's `user_uuid=` argument and `user_uuid` property are
 deprecated compatibility aliases only; new integrations should use `account=`.
 `full_trader_rest.py` demonstrates encrypted snapshots and place/modify/cancel.
+Read positions with `get_positions()` after `connect()`.

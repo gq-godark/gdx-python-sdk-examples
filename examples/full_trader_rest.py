@@ -76,6 +76,8 @@ async def main() -> int:
             type="LIMIT",
             quantity="0.01",
             price=price,
+            # Sent on the REST body only. Registration happens after a
+            # successful WebSocket place, not here.
             client_order_id="sdk-python-rest-demo",
         )
         print("placed", ack)

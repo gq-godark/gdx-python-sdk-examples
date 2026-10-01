@@ -106,13 +106,59 @@ bash scripts/package.sh
 # optional: copy sdk/dist-wheels/*.whl into ./wheels/ and rerun setup_venv.sh to test wheel install
 ```
 
+## Follow the current SDK
+
+Prices, sizes, quote notional, min fill, trigger, take-profit, and stop-loss are **strings**. `int`, `float`, and `bool` raise `TypeError`.
+
+WebSocket `op: login` uses the REST `client_credentials` **access token**. The socket does not take `key:secret:passphrase`. `GodarkClient.connect()` calls `POST /auth/token` and logs in with `access_token`.
+
+`/ws/v1` channels are `orders`, `positions`, `volume`, `open_interest`, and `funding_rate`. Trades and L2 are not on this socket.
+
+`client_order_id` is registered only after a **successful WebSocket** place. A REST place does not register it. Do not treat a process-local map as the lookup.
+
+`slippage_bps` is only for `MARKET` and `STOP_MARKET`. A `PEG` order is not post-only.
+
+`GodarkRestClient` takes `rest_base_url=`. On that client, `place_order` is keyword-only after `side` (`quantity=`, `type=` or `order_type=`, `price=`).
+
+```python
+import os
+from godark import GodarkClient, GodarkRestClient, OrderType, Side, TimeInForce
+
+rest = GodarkRestClient(
+    api_key_id=os.environ["GODARK_API_KEY_ID"],
+    api_secret=os.environ["GODARK_API_SECRET"],
+    passphrase=os.environ["GODARK_PASSPHRASE"],
+    rest_base_url=os.environ.get("GODARK_REST_URL", "https://api.godark-dex.com"),
+)
+await rest.connect()  # client_credentials → access token
+positions = await rest.get_positions()
+
+async with GodarkClient(
+    api_key_id=os.environ["GODARK_API_KEY_ID"],
+    api_secret=os.environ["GODARK_API_SECRET"],
+    passphrase=os.environ["GODARK_PASSPHRASE"],
+    base_url=os.environ.get("GODARK_EDGE_URL", "wss://api.godark-dex.com"),
+) as client:
+    await client.subscribe(["orders", "positions"])
+    ack = await client.place_order(
+        "BTC-USDC-PERP",
+        Side.SELL,
+        OrderType.LIMIT,
+        "0.01",
+        price="999999.0",
+        time_in_force=TimeInForce.GTC,
+    )
+    await client.cancel_order(ack.order_id, "BTC-USDC-PERP")
+```
+
 ## Examples
 
 | Script | Purpose |
 |--------|---------|
-| `examples/quickstart.py` | Minimal connect → `subscribe(["orders"])` → LIMIT sell far from touch → cancel (book confirmation needs the private orders channel) |
-| `examples/full_trader_example.py` | Callbacks for pushes, place / modify / cancel, mass-quote / batch-cancel, session summary |
-| `examples/rest_client_example.py` | REST auth + `/auth/me` + leverage read + public funding/OI/volume (no encrypted trading) |
+| `examples/quickstart.py` | Minimal connect → `subscribe(["orders"])` → LIMIT sell (string price) → cancel |
+| `examples/full_trader_example.py` | Callbacks, string place / modify / cancel, mass-quote, session summary |
+| `examples/rest_client_example.py` | REST `client_credentials` auth, account reads, positions |
+| `examples/full_trader_rest.py` | REST snapshots and keyword `place_order` / modify / cancel |
 
 Order-type support in this MM distribution is limited to **`MARKET`** and **`LIMIT`**.
 
