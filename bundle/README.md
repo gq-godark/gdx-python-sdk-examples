@@ -64,6 +64,45 @@ pip install --upgrade pip
 pip install wheels/godark-*.whl
 ```
 
+Prices, sizes, quote notional, min fill, trigger, take-profit, and stop-loss are strings. `int`, `float`, and `bool` raise `TypeError`.
+
+WebSocket login is the REST `client_credentials` access token, not `key:secret:passphrase`. `connect()` obtains that token.
+
+Subscribe on `/ws/v1` to `orders`, `positions`, `volume`, `open_interest`, and `funding_rate`. Trades and L2 are not on this socket.
+
+`client_order_id` is registered only after a successful WebSocket place. REST place does not register it.
+
+`slippage_bps` is only for `MARKET` and `STOP_MARKET`. `PEG` is not post-only.
+
+`GodarkRestClient(..., rest_base_url=...)` — `place_order` is keyword-only after `side`.
+
+```python
+import os
+from godark import GodarkClient, GodarkRestClient, OrderType, Side, TimeInForce
+
+rest = GodarkRestClient(
+    api_key_id=os.environ["GODARK_API_KEY_ID"],
+    api_secret=os.environ["GODARK_API_SECRET"],
+    passphrase=os.environ["GODARK_PASSPHRASE"],
+    rest_base_url=os.environ.get("GODARK_REST_URL", "https://api.godark-dex.com"),
+)
+# await rest.connect(); positions = await rest.get_positions()
+
+async def trade():
+    async with GodarkClient(
+        api_key_id=os.environ["GODARK_API_KEY_ID"],
+        api_secret=os.environ["GODARK_API_SECRET"],
+        passphrase=os.environ["GODARK_PASSPHRASE"],
+        base_url=os.environ.get("GODARK_EDGE_URL", "wss://api.godark-dex.com"),
+    ) as client:
+        await client.subscribe(["orders", "positions"])
+        ack = await client.place_order(
+            "BTC-USDC-PERP", Side.SELL, OrderType.LIMIT, "0.01",
+            price="999999.0", time_in_force=TimeInForce.GTC,
+        )
+        await client.cancel_order(ack.order_id, "BTC-USDC-PERP")
+```
+
 ## 5) Run quickstart
 
 ```bash
@@ -90,14 +129,15 @@ async def main():
     async with GodarkClient(
         api_key_id=os.environ["GODARK_API_KEY_ID"],
         api_secret=os.environ["GODARK_API_SECRET"],
+        passphrase=os.environ["GODARK_PASSPHRASE"],
         base_url=os.environ.get("GODARK_EDGE_URL", "wss://api.godark-dex.com"),
     ) as client:
         ack = await client.place_order(
             "BTC-USDC-PERP",
             Side.SELL,
             OrderType.LIMIT,
-            0.01,
-            price=999_999.0,
+            "0.01",
+            price="999999.0",
             time_in_force=TimeInForce.GTC,
         )
         await client.cancel_order(str(ack.order_id), "BTC-USDC-PERP")

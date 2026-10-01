@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import os
+import time
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -14,7 +15,7 @@ from typing import Any
 import websockets
 from websockets.asyncio.client import ClientConnection
 
-from ._transport import TransportConfig
+from ._transport import EdgeTransport, TransportConfig
 from .client import _ws_url
 from .errors import GodarkError
 
@@ -89,7 +90,11 @@ def subscription_callback_key(msg: dict[str, Any]) -> str | None:
     and ``funding_rate:``. Control messages return None so user callbacks are
     not invoked.
     """
-    typ = msg.get("type")
+    data = msg.get("data")
+    if not isinstance(data, dict):
+        data = {}
+    # Live edge embeds the snapshot on the subscribe ack: {op, data:{type:"volume_snapshot"}}.
+    typ = msg.get("type") or data.get("type")
     if typ in (
         "status",
         "subscribed",
@@ -98,7 +103,7 @@ def subscription_callback_key(msg: dict[str, Any]) -> str | None:
         "error",
     ):
         return None
-    symbol = msg.get("symbol") or ""
+    symbol = msg.get("symbol") or data.get("symbol") or ""
     if typ == "orderbook":
         return f"orderbook:{symbol}"
     if typ == "trade":
@@ -131,20 +136,41 @@ class MarketDataClient:
         await client.disconnect()
     """
 
-    HEARTBEAT_INTERVAL = 30.0
+    HEARTBEAT_INTERVAL = EdgeTransport.HEARTBEAT_INTERVAL
 
     def __init__(self, base_url: str, transport: TransportConfig | None = None):
         self._url = resolve_market_data_ws_url(base_url.strip())
         self._docs_wire = _is_docs_wire_url(self._url)
         self._transport_config = transport or TransportConfig()
+        self._heartbeat_interval: float = (
+            self._transport_config.heartbeat_interval
+            if self._transport_config.heartbeat_interval is not None
+            else EdgeTransport.HEARTBEAT_INTERVAL
+        )
+        self._stale_timeout: float = (
+            self._transport_config.stale_timeout
+            if self._transport_config.stale_timeout is not None
+            else EdgeTransport.STALE_TIMEOUT
+        )
+        self._missed_heartbeat_limit: int = (
+            self._transport_config.missed_heartbeat_limit
+            if self._transport_config.missed_heartbeat_limit is not None
+            else EdgeTransport.MISSED_HEARTBEAT_LIMIT
+        )
         self._ws: ClientConnection | None = None
         self._connected = False
+        self._last_inbound: float = 0.0
+        self._inbound_since_ping = True
+        self._missed_heartbeat_count = 0
         self._recv_task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None
+        self._reconnect_task: asyncio.Task | None = None
         self._callbacks: dict[str, Callable] = {}
         self._auto_reconnect = True
         # (channel, symbol) for symbol streams; public channels use ("__public__", channel)
         self._desired_subs: set[tuple[str, str]] = set()
+        # Set when write-half death has already woken reconnect (#56).
+        self._disconnect_signaled = False
 
     def _connect_kwargs(self) -> dict:
         kw: dict = {
@@ -166,6 +192,41 @@ class MarketDataClient:
     def is_connected(self) -> bool:
         return self._connected and self._ws is not None
 
+    def _note_inbound(self) -> None:
+        self._last_inbound = time.monotonic()
+        self._inbound_since_ping = True
+        self._missed_heartbeat_count = 0
+
+    async def _signal_disconnected(self) -> None:
+        """Wake reconnect when write fails while recv may still be alive (#56).
+
+        Same effect as the stale-heartbeat path: abort/cancel recv and start
+        reconnect here instead of hanging on a half-open socket. Do not rely
+        solely on recv's ``finally`` under cancellation.
+        """
+        if self._disconnect_signaled:
+            return
+        self._disconnect_signaled = True
+        self._connected = False
+        if self._ws is not None:
+            with contextlib.suppress(Exception):
+                await self._ws.close()
+        recv = self._recv_task
+        if recv is not None and not recv.done():
+            recv.cancel()
+        if self._auto_reconnect and (self._reconnect_task is None or self._reconnect_task.done()):
+            self._reconnect_task = asyncio.create_task(self._reconnect())
+
+    async def _ws_send(self, data: str) -> None:
+        if not self._ws:
+            raise RuntimeError("Not connected")
+        try:
+            await self._ws.send(data)
+        except Exception:
+            logger.warning("Market data WebSocket write failed")
+            await self._signal_disconnected()
+            raise
+
     async def connect(self) -> None:
         """Open WebSocket to the resolved market-data endpoint."""
         if self._heartbeat_task:
@@ -174,6 +235,10 @@ class MarketDataClient:
             self._recv_task.cancel()
         self._ws = await websockets.connect(self._url, **self._connect_kwargs())
         self._connected = True
+        self._disconnect_signaled = False
+        self._last_inbound = time.monotonic()
+        self._inbound_since_ping = True
+        self._missed_heartbeat_count = 0
         self._recv_task = asyncio.create_task(self._recv_loop())
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         await self._resubscribe_all()
@@ -234,7 +299,7 @@ class MarketDataClient:
 
     async def _send_public_subscribe(self, channel: str) -> None:
         assert self._ws is not None
-        await self._ws.send(
+        await self._ws_send(
             json.dumps(
                 {
                     "id": str(uuid.uuid4()),
@@ -258,7 +323,7 @@ class MarketDataClient:
                 "channel": channel,
                 "symbol": symbol,
             }
-        await self._ws.send(json.dumps(payload))
+        await self._ws_send(json.dumps(payload))
 
     async def _send_unsubscribe(self, channel: str, symbol: str) -> None:
         assert self._ws is not None
@@ -277,7 +342,7 @@ class MarketDataClient:
                 "channel": channel,
                 "symbol": symbol,
             }
-        await self._ws.send(json.dumps(payload))
+        await self._ws_send(json.dumps(payload))
 
     async def _resubscribe_all(self) -> None:
         if not self._ws:
@@ -291,6 +356,7 @@ class MarketDataClient:
     async def _recv_loop(self) -> None:
         try:
             async for raw in self._ws:
+                self._note_inbound()
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
@@ -316,24 +382,60 @@ class MarketDataClient:
             logger.error("Market data recv error: %s", e)
         finally:
             self._connected = False
-            if self._auto_reconnect:
-                asyncio.create_task(self._reconnect())
+            # Write-death path already scheduled reconnect (#56).
+            if (
+                not self._disconnect_signaled
+                and self._auto_reconnect
+                and (self._reconnect_task is None or self._reconnect_task.done())
+            ):
+                self._reconnect_task = asyncio.create_task(self._reconnect())
 
     async def _heartbeat_loop(self) -> None:
         try:
             while self._connected:
-                await asyncio.sleep(self.HEARTBEAT_INTERVAL)
+                await asyncio.sleep(self._heartbeat_interval)
+                if not self._connected:
+                    break
+                elapsed = time.monotonic() - self._last_inbound
+                if elapsed > self._stale_timeout:
+                    reason = f"stale heartbeat: no inbound message for {self._stale_timeout:.0f}s"
+                    logger.warning(
+                        "Market data stale connection (%.1fs no inbound), closing", elapsed
+                    )
+                    await self._signal_disconnected()
+                    break
+
+                if not self._inbound_since_ping:
+                    self._missed_heartbeat_count += 1
+                else:
+                    self._missed_heartbeat_count = 0
+
+                if self._missed_heartbeat_count >= self._missed_heartbeat_limit:
+                    reason = (
+                        f"stale heartbeat: missed {self._missed_heartbeat_count} "
+                        f"heartbeat responses (limit {self._missed_heartbeat_limit})"
+                    )
+                    logger.warning("Market data %s, closing", reason)
+                    await self._signal_disconnected()
+                    break
+
                 if self._ws and self._connected:
                     try:
                         if self._docs_wire:
                             ping: dict[str, Any] = {
                                 "id": str(uuid.uuid4()),
                                 "op": "ping",
+                                "args": {},
                             }
                         else:
                             ping = {"action": "ping"}
-                        await self._ws.send(json.dumps(ping))
-                    except Exception:
+                        await self._ws_send(json.dumps(ping))
+                        self._inbound_since_ping = False
+                    except Exception as exc:
+                        reason = f"stale heartbeat: ping send failed: {exc}"
+                        logger.warning("Market data %s", reason)
+                        # _ws_send already signaled; ensure reconnect wakes (#56).
+                        await self._signal_disconnected()
                         break
         except asyncio.CancelledError:
             return

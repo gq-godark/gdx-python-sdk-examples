@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from decimal import Decimal
 
 from dotenv import get_first, load_dotenv, print_order_error
 from godark import Environment, GodarkClient, OrderType, PlaceOrderOptions, Side, TimeInForce
@@ -12,11 +13,16 @@ from godark import Environment, GodarkClient, OrderType, PlaceOrderOptions, Side
 SYMBOL = "BTC-USDC-PERP"
 
 
-def live_mark_price() -> float:
+def live_mark_price() -> str:
     raw = get_first("GODARK_E2E_PRICE", "GDX_E2E_PRICE", "GDX_LIVE_PRICE")
     if raw:
-        return float(raw)
-    return 79_000.0
+        return raw.strip()
+    return "79000.0"
+
+
+def decimal_mul(value: str, factor: str, places: int = 1) -> str:
+    q = Decimal("1").scaleb(-places)
+    return format((Decimal(value) * Decimal(factor)).quantize(q), "f")
 
 
 async def main() -> int:
@@ -26,10 +32,15 @@ async def main() -> int:
     client_kwargs: dict = {"environment": Environment.TESTNET}
     if edge := get_first("GODARK_EDGE_URL", "GDX_EDGE_URL"):
         client_kwargs["base_url"] = edge
+    account = get_first("GODARK_ACCOUNT", "GDX_ACCOUNT")
+    deprecated_user_uuid = get_first("GODARK_USER_UUID", "GDX_USER_UUID")
+    if account:
+        client_kwargs["account"] = account
+    elif deprecated_user_uuid:
+        # Compatibility only. New integrations should configure GODARK_ACCOUNT.
+        client_kwargs["user_uuid"] = deprecated_user_uuid
     if legacy_key:
         client_kwargs["api_key"] = legacy_key
-        if uid := get_first("GODARK_USER_UUID", "GDX_USER_UUID"):
-            client_kwargs["user_uuid"] = uid
     else:
         api_key_id = get_first("GODARK_API_KEY_ID", "GDX_API_KEY_ID")
         api_secret = get_first("GODARK_API_SECRET", "GDX_API_SECRET")
@@ -49,19 +60,18 @@ async def main() -> int:
 
     try:
         async with GodarkClient(**client_kwargs) as client:
-            user = client.user_uuid or ""
-            print(f"Connected as user_uuid={user}")
+            print(f"Connected as account={client.account or ''}")
             try:
                 # Book confirmation waits on private order updates; subscribe first.
                 await client.subscribe(["orders"])
                 await asyncio.sleep(0.35)
                 mark = live_mark_price()
-                sell_px = round(mark * 1.03, 1)
+                sell_px = decimal_mul(mark, "1.03")
                 ack = await client.place_order(
                     SYMBOL,
                     Side.SELL,
                     OrderType.LIMIT,
-                    0.01,
+                    "0.01",
                     price=sell_px,
                     time_in_force=TimeInForce.GTC,
                     options=PlaceOrderOptions(post_only=True),

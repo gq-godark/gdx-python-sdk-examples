@@ -35,6 +35,7 @@ rsync -a --delete \
   "$SRC/src/godark/" "$DEST_SDK/godark/"
 
 cp "$SRC/shared/symbols.json" "$DEST_SDK/shared/symbols.json"
+git -C "$SRC" rev-parse HEAD > "$DEST_SDK/UPSTREAM_REF"
 
 echo "Vendored size:"
 du -sh "$DEST_SDK"
