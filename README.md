@@ -54,7 +54,8 @@ Optional:
 - `GODARK_EDGE_URL` — override the edge URL (default: public testnet `wss://api.godark-dex.com` via the SDK Testnet environment preset).
 - `GDX_HPKE_STATIC_PUBLIC_KEY` — sequencer HPKE static public key (64 hex). Required for **localnet/devnet** encrypted trading Aliases: `GDX_HPKE_STATIC_PUBKEY`, `GODARK_HPKE_STATIC_PUBLIC_KEY`, `VITE_GDX_HPKE_STATIC_PUBKEY`.
 
-Some local edges require a user UUID from auth; set `GODARK_USER_UUID` when needed.
+Some local edges require a base58 32-byte account fallback; set
+`GODARK_ACCOUNT` when auth does not return `account`.
 
 ## Localnet (`gdx up`)
 
@@ -70,25 +71,23 @@ Fund the default user: `gdx fund 00000000-0000-4000-8000-000000000001`. Copy `VI
 
 ## Install
 
-### From a packaged tarball (recommended for MMs)
+### From a packaged zip (recommended for MMs)
 
-Unpack the archive you received. It contains `wheels/godark-*.whl`, vendored `sdk/`, `examples/`, and `scripts/setup_venv.sh`.
+Unpack the archive you received. It contains `wheels/godark-*.whl`,
+`examples/`, `README.md`, `SDK_REFERENCE.md`, and `.env.example`.
 
 ```bash
-bash scripts/setup_venv.sh
+python3 -m venv .venv
 source .venv/bin/activate
+pip install --upgrade pip
+pip install wheels/godark-*.whl
 cd examples && python quickstart.py
 python full_trader_example.py
 python rest_client_example.py
 ```
 
-`setup_venv.sh` **prefers installing the packaged wheel** under `wheels/` (immutable SDK snapshot). Dependencies such as `cryptography` are pulled from PyPI using the wheel’s metadata.
-
-To force install from the vendored source tree instead (debugging):
-
-```bash
-PREFER_SDK_SOURCE=1 bash scripts/setup_venv.sh
-```
+Dependencies such as `cryptography` are pulled from PyPI using the wheel’s
+metadata.
 
 ### From a git clone (development)
 
@@ -107,34 +106,79 @@ bash scripts/package.sh
 # optional: copy sdk/dist-wheels/*.whl into ./wheels/ and rerun setup_venv.sh to test wheel install
 ```
 
+## Follow the current SDK
+
+Prices, sizes, quote notional, min fill, trigger, take-profit, and stop-loss are **strings**. `int`, `float`, and `bool` raise `TypeError`.
+
+WebSocket `op: login` uses the REST `client_credentials` **access token**. The socket does not take `key:secret:passphrase`. `GodarkClient.connect()` calls `POST /auth/token` and logs in with `access_token`.
+
+`/ws/v1` channels are `orders`, `positions`, `volume`, `open_interest`, and `funding_rate`. Trades and L2 are not on this socket.
+
+`client_order_id` is registered only after a **successful WebSocket** place. A REST place does not register it. Do not treat a process-local map as the lookup.
+
+`slippage_bps` is only for `MARKET` and `STOP_MARKET`. A `PEG` order is not post-only.
+
+`GodarkRestClient` takes `rest_base_url=`. On that client, `place_order` is keyword-only after `side` (`quantity=`, `type=` or `order_type=`, `price=`).
+
+```python
+import os
+from godark import GodarkClient, GodarkRestClient, OrderType, Side, TimeInForce
+
+rest = GodarkRestClient(
+    api_key_id=os.environ["GODARK_API_KEY_ID"],
+    api_secret=os.environ["GODARK_API_SECRET"],
+    passphrase=os.environ["GODARK_PASSPHRASE"],
+    rest_base_url=os.environ.get("GODARK_REST_URL", "https://api.godark-dex.com"),
+)
+await rest.connect()  # client_credentials → access token
+positions = await rest.get_positions()
+
+async with GodarkClient(
+    api_key_id=os.environ["GODARK_API_KEY_ID"],
+    api_secret=os.environ["GODARK_API_SECRET"],
+    passphrase=os.environ["GODARK_PASSPHRASE"],
+    base_url=os.environ.get("GODARK_EDGE_URL", "wss://api.godark-dex.com"),
+) as client:
+    await client.subscribe(["orders", "positions"])
+    ack = await client.place_order(
+        "BTC-USDC-PERP",
+        Side.SELL,
+        OrderType.LIMIT,
+        "0.01",
+        price="999999.0",
+        time_in_force=TimeInForce.GTC,
+    )
+    await client.cancel_order(ack.order_id, "BTC-USDC-PERP")
+```
+
 ## Examples
 
 | Script | Purpose |
 |--------|---------|
-| `examples/quickstart.py` | Minimal connect → `subscribe(["orders"])` → LIMIT sell far from touch → cancel (book confirmation needs the private orders channel) |
-| `examples/full_trader_example.py` | Callbacks for pushes, place / modify / cancel, mass-quote / batch-cancel, session summary |
-| `examples/rest_client_example.py` | REST auth + `/auth/me` + leverage read + public funding/OI/volume (no encrypted trading) |
+| `examples/quickstart.py` | Minimal connect → `subscribe(["orders"])` → LIMIT sell (string price) → cancel |
+| `examples/full_trader_example.py` | Callbacks, string place / modify / cancel, mass-quote, session summary |
+| `examples/rest_client_example.py` | REST `client_credentials` auth, account reads, positions |
+| `examples/full_trader_rest.py` | REST snapshots and keyword `place_order` / modify / cancel |
 
 Order-type support in this MM distribution is limited to **`MARKET`** and **`LIMIT`**.
 
 ## Packaging for market makers
 
-Create a clean distributable archive:
+Create a clean wheels-only distributable archive:
 
 ```bash
-bash scripts/package.sh              # godark-python-examples.tar.gz
+bash scripts/package.sh              # godark-python-sdk.zip
 bash scripts/package.sh my-release   # custom archive name stem
 ```
 
-The tarball includes:
+The zip includes:
 
-- `sdk/` — vendored package sources (including generated protobuf under `godark/_generated/`)
 - `wheels/` — `godark-*.whl` built from `sdk/` (`pip wheel --no-deps`; runtime deps install via pip when the wheel is installed)
 - `examples/` — MM example scripts
-- `scripts/setup_venv.sh` — bootstrap script for recipients
 - `README.md`, `SDK_REFERENCE.md`, `.env.example`
 
-Internal-only paths (`scripts/package.sh`, `scripts/refresh_sdk.sh`, `.git/`, local `.env`, virtualenvs, build artifacts) are **not** included.
+Internal-only paths (`sdk/`, `scripts/`, `.git/`, local `.env`, virtualenvs,
+build artifacts) are **not** included.
 
 ## Layout
 

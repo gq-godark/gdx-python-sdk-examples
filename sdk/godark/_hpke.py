@@ -31,18 +31,18 @@ _SUITE = CipherSuite.new(
 )
 
 
-def info_for_conn(user_uuid: bytes, conn_id: int) -> bytes:
-    """``gdx-hpke/v1\\0 ‖ user_uuid ‖ conn_id_be``."""
-    if len(user_uuid) != 16:
-        raise ValueError(f"user_uuid must be 16 bytes, got {len(user_uuid)}")
-    return INFO_DOMAIN + user_uuid + conn_id.to_bytes(8, "big")
+def info_for_conn(account: bytes, conn_id: int) -> bytes:
+    """``gdx-hpke/v1\\0 ‖ account ‖ conn_id_be``."""
+    if len(account) != 32:
+        raise ValueError(f"account must be 32 bytes, got {len(account)}")
+    return INFO_DOMAIN + account + conn_id.to_bytes(8, "big")
 
 
-def info_for_rest_request(user_uuid: bytes, request_id: int) -> bytes:
-    """``gdx-hpke/v1/rest\\0 ‖ user_uuid ‖ request_id_be``."""
-    if len(user_uuid) != 16:
-        raise ValueError(f"user_uuid must be 16 bytes, got {len(user_uuid)}")
-    return INFO_DOMAIN_REST + user_uuid + request_id.to_bytes(8, "big")
+def info_for_rest_request(account: bytes, request_id: int) -> bytes:
+    """``gdx-hpke/v1/rest\\0 ‖ account ‖ request_id_be``."""
+    if len(account) != 32:
+        raise ValueError(f"account must be 32 bytes, got {len(account)}")
+    return INFO_DOMAIN_REST + account + request_id.to_bytes(8, "big")
 
 
 def nonce_from_u64(counter: int) -> bytes:

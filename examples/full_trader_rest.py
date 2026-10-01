@@ -5,21 +5,22 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from decimal import Decimal
 
 from dotenv import get_first, load_dotenv
 from godark import GodarkRestClient
 
 
-def _live_price() -> float:
+def _live_price() -> str:
     raw = get_first("GDX_LIVE_PRICE", "GODARK_LIVE_PRICE")
     if raw:
-        return float(raw)
-    return 78000.0
+        return raw.strip()
+    return "78000.0"
 
 
-def _rest_limit_price() -> float:
+def _rest_limit_price() -> str:
     """BUY limit well below touch so place/modify/cancel stay in the book."""
-    return _live_price() - 5000.0
+    return format(Decimal(_live_price()) - Decimal("5000"), "f")
 
 
 async def main() -> int:
@@ -30,6 +31,12 @@ async def main() -> int:
     secret = get_first("GODARK_API_SECRET", "GDX_API_SECRET")
     pp = get_first("GODARK_PASSPHRASE", "GDX_PASSPHRASE")
     api_key = get_first("GODARK_API_KEY", "GDX_API_KEY")
+    identity_kwargs: dict = {}
+    if account := get_first("GODARK_ACCOUNT", "GDX_ACCOUNT"):
+        identity_kwargs["account"] = account
+    elif deprecated_user_uuid := get_first("GODARK_USER_UUID", "GDX_USER_UUID"):
+        # Compatibility only. New integrations should configure GODARK_ACCOUNT.
+        identity_kwargs["user_uuid"] = deprecated_user_uuid
     if kid and secret:
         if not pp:
             print(
@@ -38,10 +45,14 @@ async def main() -> int:
             )
             return 1
         client = GodarkRestClient(
-            api_key_id=kid, api_secret=secret, passphrase=pp, rest_base_url=rest
+            api_key_id=kid,
+            api_secret=secret,
+            passphrase=pp,
+            rest_base_url=rest,
+            **identity_kwargs,
         )
     elif api_key:
-        client = GodarkRestClient(api_key=api_key, rest_base_url=rest)
+        client = GodarkRestClient(api_key=api_key, rest_base_url=rest, **identity_kwargs)
     else:
         print(
             "Missing credentials: set GODARK_API_KEY_ID, GODARK_API_SECRET and "
@@ -52,9 +63,7 @@ async def main() -> int:
 
     price = _rest_limit_price()
     async with client:
-        print(
-            f"identity: user_uuid={client.user_uuid_str} scope={client.token_scope}"
-        )
+        print(f"identity: account={client.account_str} scope={client.token_scope}")
         print("open_orders", len((await client.get_open_orders()).rows))
         print("positions", len((await client.get_positions()).rows))
         acct = await client.get_account()
@@ -65,8 +74,10 @@ async def main() -> int:
             "BTC-USDC-PERP",
             "BUY",
             type="LIMIT",
-            quantity=0.01,
+            quantity="0.01",
             price=price,
+            # Sent on the REST body only. Registration happens after a
+            # successful WebSocket place, not here.
             client_order_id="sdk-python-rest-demo",
         )
         print("placed", ack)
@@ -75,7 +86,7 @@ async def main() -> int:
         modify_ack = await client.modify_order(
             ack.order_id,
             "BTC-USDC-PERP",
-            new_price=price - 64,
+            new_price=format(Decimal(price) - Decimal("64"), "f"),
         )
         print("modified", modify_ack)
 

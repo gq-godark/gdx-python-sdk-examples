@@ -10,6 +10,7 @@
 #   ├── examples/
 #   │   ├── dotenv.py
 #   │   ├── full_trader_example.py
+#   │   ├── full_trader_rest.py
 #   │   └── quickstart.py
 #   └── wheels/
 #       └── godark-*.whl       (built from sdk/ via `pip wheel --no-deps`)
@@ -34,17 +35,12 @@ if [[ ! -f "${REPO_ROOT}/sdk/pyproject.toml" ]]; then
   echo "error: sdk/pyproject.toml missing — cannot build wheel" >&2
   exit 1
 fi
-for required in bundle/README.md bundle/SDK_REFERENCE.md .env.example examples/quickstart.py examples/full_trader_example.py examples/rest_client_example.py examples/dotenv.py; do
+for required in bundle/README.md bundle/SDK_REFERENCE.md .env.example examples/quickstart.py examples/full_trader_example.py examples/full_trader_rest.py examples/rest_client_example.py examples/dotenv.py; do
   if [[ ! -f "${REPO_ROOT}/${required}" ]]; then
     echo "error: required source file missing: ${required}" >&2
     exit 1
   fi
 done
-if ! command -v zip >/dev/null 2>&1; then
-  echo "error: 'zip' not found in PATH (apt-get install zip)" >&2
-  exit 1
-fi
-
 # ---- build wheel ----------------------------------------------------------
 echo "Building wheel from sdk/ ..."
 rm -rf "${REPO_ROOT}/sdk/dist-wheels"
@@ -63,6 +59,7 @@ echo "Staging wheels-only distribution at $DEST ..."
 cp "${REPO_ROOT}/sdk/dist-wheels"/godark-*.whl "$DEST/wheels/"
 cp "${REPO_ROOT}/examples/quickstart.py" \
    "${REPO_ROOT}/examples/full_trader_example.py" \
+   "${REPO_ROOT}/examples/full_trader_rest.py" \
    "${REPO_ROOT}/examples/rest_client_example.py" \
    "${REPO_ROOT}/examples/dotenv.py" \
    "$DEST/examples/"
@@ -73,7 +70,19 @@ cp "${REPO_ROOT}/bundle/SDK_REFERENCE.md" "$DEST/SDK_REFERENCE.md"
 # ---- zip ------------------------------------------------------------------
 ARCHIVE="$REPO_ROOT/${DIST_NAME}.zip"
 rm -f "$ARCHIVE"
-( cd "$STAGING_DIR" && zip -qr "$ARCHIVE" "$DIST_NAME" )
+python3 - "$STAGING_DIR" "$DIST_NAME" "$ARCHIVE" <<'PY'
+import pathlib
+import sys
+import zipfile
+
+staging = pathlib.Path(sys.argv[1])
+dist_name = sys.argv[2]
+archive = pathlib.Path(sys.argv[3])
+with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as out:
+    for path in sorted((staging / dist_name).rglob("*")):
+        if path.is_file():
+            out.write(path, path.relative_to(staging))
+PY
 rm -rf "$STAGING_DIR"
 
 # ---- post-flight assertions ----------------------------------------------
@@ -94,6 +103,8 @@ for required in \
   "${DIST_NAME}/wheels/godark-.*\\.whl" \
   "${DIST_NAME}/examples/quickstart\\.py" \
   "${DIST_NAME}/examples/full_trader_example\\.py" \
+  "${DIST_NAME}/examples/full_trader_rest\\.py" \
+  "${DIST_NAME}/examples/rest_client_example\\.py" \
   "${DIST_NAME}/examples/dotenv\\.py" \
   "${DIST_NAME}/README\\.md" \
   "${DIST_NAME}/SDK_REFERENCE\\.md" \
@@ -109,10 +120,10 @@ echo "wheels-only assertion: PASSED"
 
 # Must NOT leak internal repo names or maintainer markers into the archive.
 if unzip -p "$ARCHIVE" 2>/dev/null | strings | grep -qiE \
-  'gdx-python-sdk|UPSTREAM_REF|refresh_sdk|package\.sh|\bvendored\b'; then
+  'gdx-python-sdk|UPSTREAM_REF|refresh_sdk|package\.sh|vendored'; then
   echo "error: bundle contains internal repo references or maintainer markers" >&2
   unzip -p "$ARCHIVE" 2>/dev/null | strings | grep -iE \
-    'gdx-python-sdk|UPSTREAM_REF|refresh_sdk|package\.sh|\bvendored\b' | head -20 >&2 || true
+    'gdx-python-sdk|UPSTREAM_REF|refresh_sdk|package\.sh|vendored' | head -20 >&2 || true
   exit 1
 fi
 

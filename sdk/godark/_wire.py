@@ -20,9 +20,9 @@ class DecodedBinary(Enum):
     IGNORED = "ignored"
 
 
-def encode_hpke_setup(user_uuid: bytes, conn_id: int, encapped_key: bytes) -> bytes:
+def encode_hpke_setup(account: bytes, conn_id: int, encapped_key: bytes) -> bytes:
     frame = edge_pb2.TradingWsBinaryFrame()
-    frame.hpke_setup.user_uuid = user_uuid
+    frame.hpke_setup.account = account
     frame.hpke_setup.conn_id = conn_id
     frame.hpke_setup.encapped_key = encapped_key
     return frame.SerializeToString()
@@ -124,7 +124,7 @@ def decode_binary_frame(data: bytes) -> tuple[DecodedBinary, Any]:
 
 def build_order_header_proto(
     *,
-    user_uuid: bytes,
+    account: bytes,
     symbol_id: int,
     request_type_str: str,
     nonce: int,
@@ -133,7 +133,7 @@ def build_order_header_proto(
     conn_id: int,
 ) -> edge_pb2.OrderHeader:
     return edge_pb2.OrderHeader(
-        user_uuid=user_uuid,
+        account=account,
         symbol_id=symbol_id,
         request_type=request_type_to_proto(request_type_str),
         nonce=nonce,

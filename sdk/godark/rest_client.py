@@ -10,12 +10,20 @@ import time
 import uuid
 from typing import Any, Literal
 
+import httpx
+
 from . import _proto
-from ._access_token import user_uuid_from_access_token_jwt
+from ._access_token import account_from_access_token_jwt
 from ._hpke import SealedSession, nonce_from_u64, pinned_sequencer_static_pub
+from ._identity import account_to_bytes
 from ._rest_transport import RestEnvelopeError, RestTransport
 from ._session import CryptoSession
-from ._symbols import load_offline_symbol_map, load_symbol_map_from_edge
+from ._symbols import (
+    InstrumentDecimals,
+    load_instruments_from_edge,
+    load_offline_decimals_map,
+    load_offline_symbol_map,
+)
 from .client import Environment, _resolve_hpke_static_public_key_hex, _resolve_passphrase
 from .enums import OrderType, Side, TimeInForce
 from .errors import EncryptionError, OrderError, SessionError, TimeoutError
@@ -90,8 +98,8 @@ def _timestamp_ns() -> int:
     return int(time.time() * 1_000_000_000)
 
 
-def _env_user_uuid() -> str | None:
-    for key in ("GODARK_USER_UUID", "GDX_USER_UUID"):
+def _env_account() -> str | None:
+    for key in ("GODARK_ACCOUNT", "GDX_ACCOUNT", "GODARK_USER_UUID", "GDX_USER_UUID"):
         value = os.environ.get(key, "").strip()
         if value:
             return value
@@ -103,6 +111,40 @@ def _correlation_id_header_hex(correlation_id: bytes) -> str:
         return correlation_id.hex() if correlation_id else ""
     value = int.from_bytes(correlation_id, "big")
     return f"{value:032x}" if value else ""
+
+
+def _correlation_id_decimal(correlation_id: bytes) -> str:
+    """Decimal u128 matching the place header the edge armed."""
+    if len(correlation_id) != 16:
+        return ""
+    value = int.from_bytes(correlation_id, "big")
+    return str(value) if value else ""
+
+
+_TERMINAL_ORDER_STATUSES = frozenset({"FILLED", "CANCELLED", "REJECTED"})
+
+_STATUS_ALIASES = {
+    "NEW": "NEW",
+    "OPEN": "NEW",
+    "PARTIALLY_FILLED": "PARTIALLY_FILLED",
+    "PARTIALLYFILLED": "PARTIALLY_FILLED",
+    "FILLED": "FILLED",
+    "CANCELLED": "CANCELLED",
+    "CANCELED": "CANCELLED",
+    "REJECTED": "REJECTED",
+}
+
+
+def _normalize_order_status(value: Any) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "value"):
+        value = value.value
+    text = str(value).strip()
+    if not text:
+        return ""
+    key = text.upper().replace("-", "_").replace(" ", "_")
+    return _STATUS_ALIASES.get(key, key)
 
 
 class GodarkRestClient:
@@ -122,10 +164,11 @@ class GodarkRestClient:
         api_secret: str | None = None,
         passphrase: str | None = None,
         rest_base_url: str | None = None,
-        user_uuid: str | None = None,
+        account: str | None = None,
         hpke_static_public_key_hex: str | None = None,
         environment: Environment | None = None,
         symbol_map: dict[str, int] | None = None,
+        user_uuid: str | None = None,
     ):
         if api_key_id is not None or api_secret is not None:
             if api_key_id is None or api_secret is None:
@@ -152,9 +195,14 @@ class GodarkRestClient:
         self._rest_base = _resolve_rest_base_url(rest_base_url)
         self._user_symbol_map = symbol_map is not None
         self._symbol_map = dict(symbol_map) if symbol_map is not None else load_offline_symbol_map()
+        self._decimals_map: dict[str, InstrumentDecimals] = (
+            load_offline_decimals_map() if symbol_map is None else {}
+        )
         self._http = RestTransport(self._rest_base)
         self._bearer: str | None = None
-        self._user_uuid = user_uuid or _env_user_uuid()
+        if account is not None and user_uuid is not None:
+            raise ValueError("use account, not both account and deprecated user_uuid")
+        self._account = account or user_uuid or _env_account()
         self._token_scope: str | None = None
         env = (
             environment
@@ -168,6 +216,8 @@ class GodarkRestClient:
         self._hpke_pin_hex = _resolve_hpke_static_public_key_hex(hpke_static_public_key_hex, env)
         self._next_request_id = 1
         self._local_coid_index: dict[str, str] = {}
+        # Status learned from decrypted acks / open-order snapshots / history.
+        self._order_status_cache: dict[str, str] = {}
 
     @property
     def bearer_token(self) -> str | None:
@@ -178,13 +228,18 @@ class GodarkRestClient:
         return self._token_scope
 
     @property
-    def user_uuid_str(self) -> str | None:
-        return self._user_uuid
+    def account_str(self) -> str | None:
+        return self._account
+
+    @property
+    def account(self) -> str | None:
+        """Alias for ``account_str`` (WS client parity)."""
+        return self._account
 
     @property
     def user_uuid(self) -> str | None:
-        """Alias for ``user_uuid_str`` (WS client parity)."""
-        return self._user_uuid
+        """Deprecated compatibility alias for :attr:`account`."""
+        return self._account
 
     def _resolve_symbol(self, symbol: str) -> int:
         sid = self._symbol_map.get(symbol)
@@ -192,14 +247,20 @@ class GodarkRestClient:
             raise ValueError(f"unknown symbol: {symbol}")
         return sid
 
-    def _user_uuid_bytes(self) -> bytes:
-        if self._user_uuid is None:
+    def _resolve_scale(self, symbol: str) -> InstrumentDecimals:
+        scale = self._decimals_map.get(symbol)
+        if scale is not None:
+            return scale
+        return InstrumentDecimals(price_decimals=8, quantity_decimals=8)
+
+    def _account_bytes(self) -> bytes:
+        if self._account is None:
             raise SessionError("Not authenticated")
-        return uuid.UUID(self._user_uuid).bytes
+        return account_to_bytes(self._account)
 
     async def connect(self) -> None:
         if not self._user_symbol_map:
-            self._symbol_map = await load_symbol_map_from_edge(self._rest_base)
+            self._symbol_map, self._decimals_map = await load_instruments_from_edge(self._rest_base)
         if self._api_key_id is not None:
             auth_data = await self._http.auth_token(
                 grant_type="client_credentials",
@@ -214,20 +275,24 @@ class GodarkRestClient:
             raise SessionError("auth/token missing access_token/token")
         self._token_scope = auth_data.get("scope")
         resolved: str | None = None
-        legacy_uuid = auth_data.get("user_uuid")
-        if isinstance(legacy_uuid, str) and legacy_uuid.strip():
-            resolved = legacy_uuid.strip()
+        account = auth_data.get("account")
+        if isinstance(account, str) and account.strip():
+            resolved = account.strip()
         if not resolved:
-            parsed = user_uuid_from_access_token_jwt(self._bearer)
+            parsed = account_from_access_token_jwt(self._bearer)
             if parsed is not None:
                 resolved = str(parsed)
-        if not resolved and self._user_uuid:
-            resolved = self._user_uuid
+        if not resolved and self._account:
+            resolved = self._account
         if not resolved:
             raise SessionError(
-                "REST auth succeeded but user identity missing; JWT sub and fallback UUID both absent"
+                "REST auth succeeded but account missing; JWT sub and fallback account both absent"
             )
-        self._user_uuid = resolved
+        self._account = resolved
+        try:
+            account_to_bytes(resolved)
+        except ValueError as exc:
+            raise SessionError(f"REST auth returned invalid account: {exc}") from exc
 
     async def disconnect(self) -> None:
         try:
@@ -235,7 +300,7 @@ class GodarkRestClient:
                 await self._http.revoke_token(bearer=self._bearer)
         finally:
             self._bearer = None
-            self._user_uuid = None
+            self._account = None
             self._token_scope = None
             await self._http.aclose()
 
@@ -262,15 +327,15 @@ class GodarkRestClient:
         if not self._bearer:
             raise SessionError("not authenticated – call connect() first")
         recipient = pinned_sequencer_static_pub(self._hpke_pin_hex)
-        user = uuid.UUID(self._user_uuid)
+        account = self._account_bytes()
         request_id = self._next_request_id
         self._next_request_id += 1
-        encapped, sealed = CryptoSession.setup_rest(recipient, user, request_id)
+        encapped, sealed = CryptoSession.setup_rest(recipient, account, request_id)
 
         nonce = 0
         body_length = len(plaintext) + _GCM_TAG_LEN
         aad = _proto.build_order_header_aad(
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             symbol_id=symbol_id,
             request_type_str=request_type,
             nonce=nonce,
@@ -386,7 +451,7 @@ class GodarkRestClient:
         message_type = str(msg.get("message_type", "ack"))
         fencing_epoch = int(msg.get("fencing_epoch", 0))
         aad = _proto.build_response_header_aad(
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             message_type_str=message_type,
             body_length=len(ct),
             nonce=nonce,
@@ -409,8 +474,12 @@ class GodarkRestClient:
                 ack_dict.get("reject_text") or "order rejected",
                 error_code=str(ack_dict.get("error_code", "")) or None,
             )
+        order_id = str(ack_dict.get("order_id", ""))
+        status = _normalize_order_status(ack_dict.get("order_status"))
+        if order_id and status:
+            self._remember_order_status(order_id, status)
         return OrderAck(
-            order_id=str(ack_dict.get("order_id", "")),
+            order_id=order_id,
             success=True,
             sequence=str(ack_dict.get("sequence", "")),
         )
@@ -424,7 +493,7 @@ class GodarkRestClient:
         message_type = str(msg.get("message_type", "ack"))
         fencing_epoch = int(msg.get("fencing_epoch", 0))
         aad = _proto.build_response_header_aad(
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             message_type_str=message_type,
             body_length=len(ct),
             nonce=nonce,
@@ -445,21 +514,21 @@ class GodarkRestClient:
         path: str,
     ) -> tuple[str, Any]:
         corr_id = _new_correlation_id()
-        plaintext = build_proto(self._user_uuid_bytes(), corr_id)
+        plaintext = build_proto(self._account_bytes(), corr_id)
         header_symbol_id = self._symbol_map.get("BTC-USDC-PERP")
         if header_symbol_id is None:
             header_symbol_id = next(iter(self._symbol_map.values()), 1)
         if not self._bearer:
             raise SessionError("not authenticated – call connect() first")
         recipient = pinned_sequencer_static_pub(self._hpke_pin_hex)
-        user = uuid.UUID(self._user_uuid)
+        account = self._account_bytes()
         request_id = self._next_request_id
         self._next_request_id += 1
-        encapped, sealed = CryptoSession.setup_rest(recipient, user, request_id)
+        encapped, sealed = CryptoSession.setup_rest(recipient, account, request_id)
         nonce = 0
         body_length = len(plaintext) + _GCM_TAG_LEN
         aad = _proto.build_order_header_aad(
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             symbol_id=header_symbol_id,
             request_type_str=request_type,
             nonce=nonce,
@@ -523,17 +592,23 @@ class GodarkRestClient:
         symbol: str,
         side: str | Side,
         *,
-        quantity: float,
+        quantity: str,
         type: str | OrderType | None = None,
         order_type: str | OrderType | None = None,
-        price: float | None = None,
+        price: str | None = None,
         time_in_force: str | TimeInForce = "GTC",
         aon: bool = False,
-        min_fill_size: float | None = None,
+        min_fill_size: str | None = None,
         expiry_time: int | None = None,
         client_order_id: str | None = None,
     ) -> OrderAck:
-        """Place order. Accept docs alias ``type=`` or ``order_type=``."""
+        """Place order. Accept docs alias ``type=`` or ``order_type=``.
+
+        ``client_order_id`` may be sent on the REST body, but a REST place does
+        not arm a place correlation, so this method does not call
+        ``POST /orders/_register_coid`` and does not cache the id. Server-side
+        client-order lookup follows a successful WebSocket place.
+        """
         ot = type if type is not None else order_type
         if ot is None:
             raise ValueError("provide type= or order_type=")
@@ -549,7 +624,7 @@ class GodarkRestClient:
             side=side_str,
             order_type=otype_str,
             quantity=quantity,
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             price=price,
             time_in_force=tif_str,
             aon=aon,
@@ -557,9 +632,10 @@ class GodarkRestClient:
             expiry_time=expiry_time,
             correlation_id_bytes=corr_id,
             timestamp=_timestamp_ns(),
+            scale=self._resolve_scale(symbol),
         )
 
-        ack = await self._send_encrypted_order(
+        return await self._send_encrypted_order(
             "place",
             symbol_id,
             plaintext,
@@ -567,41 +643,16 @@ class GodarkRestClient:
             client_order_id=client_order_id,
         )
 
-        # After local decrypt of the ack we know the assigned order_id. Two things:
-        # 1. Cache it in our local coid index so cancel_order_by_client_id can encrypt
-        #    with the real order_id (sequencer requires the real id inside the ciphertext).
-        # 2. Push the cleartext routing mapping back to the edge so other clients
-        #    (and edge-side ?client_order_id= resolution) work too. Best-effort.
-        if client_order_id and ack.success and ack.order_id:
-            self._local_coid_index[client_order_id] = str(ack.order_id)
-            try:
-                if not self._bearer:
-                    raise SessionError("not authenticated – call connect() first")
-                await self._http.register_client_order_mapping(
-                    bearer=self._bearer,
-                    client_order_id=client_order_id,
-                    order_id=str(ack.order_id),
-                )
-            except Exception as e:  # noqa: BLE001 — registration is best-effort
-                _LOG.warning(
-                    "register_client_order_mapping failed for coid=%s order_id=%s: %s",
-                    client_order_id,
-                    ack.order_id,
-                    e,
-                )
-
-        return ack
-
     async def cancel_order(self, order_id: str, symbol: str = "BTC-USDC-PERP") -> OrderAck:
         symbol_id = self._resolve_symbol(symbol)
         corr_id = _new_correlation_id()
         plaintext = _proto.build_cancel_order_proto(
             order_id=int(order_id),
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             symbol_id=symbol_id,
             correlation_id_bytes=corr_id,
         )
-        return await self._send_encrypted(
+        ack = await self._send_encrypted(
             "cancel",
             symbol_id,
             plaintext,
@@ -609,35 +660,34 @@ class GodarkRestClient:
             route="delete",
             order_id=str(order_id),
         )
+        if ack.success:
+            # A successful cancel ack is terminal. GET /orders/{id} then returns
+            # 403 for ids that are no longer working.
+            self._remember_order_status(str(order_id), "CANCELLED")
+        return ack
 
     async def cancel_order_by_client_id(
         self, client_order_id: str, symbol: str = "BTC-USDC-PERP"
     ) -> OrderAck:
         """Cancel by client-supplied idempotency key.
 
-        Resolution order (Zone A: SDK is the only party that decrypted the place ACK
-        and therefore knows the real ``order_id`` for this ``client_order_id``):
-
-        1. Local in-memory index populated by :meth:`place_order`.
-        2. Edge-side ``GET /api/v1/orders?client_order_id=`` (returns the routing key).
-        3. Otherwise raise — SDK cannot encrypt a cancel with a sentinel id since the
-           sequencer matches against the real id inside the ciphertext.
+        The sequencer id comes from ``GET /api/v1/orders?client_order_id=``.
+        The in-memory index is not a substitute for that lookup. It is updated
+        only after the edge returns the mapping.
         """
-        order_id = self._local_coid_index.get(client_order_id)
-        if order_id is None:
-            if not self._bearer:
-                raise SessionError("not authenticated – call connect() first")
-            try:
-                row = await self._http.get_order_by_client_order_id(
-                    bearer=self._bearer,
-                    client_order_id=client_order_id,
-                )
-                order_id = str(row.get("order_id") or "")
-            except RestEnvelopeError:
-                order_id = ""
-            if not order_id:
-                raise OrderError(f"unknown client_order_id: {client_order_id}")
-            self._local_coid_index[client_order_id] = order_id
+        if not self._bearer:
+            raise SessionError("not authenticated – call connect() first")
+        try:
+            row = await self._http.get_order_by_client_order_id(
+                bearer=self._bearer,
+                client_order_id=client_order_id,
+            )
+            order_id = str(row.get("order_id") or "")
+        except RestEnvelopeError:
+            order_id = ""
+        if not order_id:
+            raise OrderError(f"unknown client_order_id: {client_order_id}")
+        self._local_coid_index[client_order_id] = order_id
         return await self.cancel_order(order_id, symbol=symbol)
 
     async def modify_order(
@@ -645,20 +695,21 @@ class GodarkRestClient:
         order_id: str,
         symbol: str = "BTC-USDC-PERP",
         *,
-        new_price: float | None = None,
-        new_quantity: float | None = None,
-        new_trigger_price: float | None = None,
+        new_price: str | None = None,
+        new_quantity: str | None = None,
+        new_trigger_price: str | None = None,
     ) -> OrderAck:
         symbol_id = self._resolve_symbol(symbol)
         corr_id = _new_correlation_id()
         plaintext = _proto.build_modify_order_proto(
             order_id=int(order_id),
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             symbol_id=symbol_id,
             new_price=new_price,
             new_quantity=new_quantity,
             new_trigger_price=new_trigger_price,
             correlation_id_bytes=corr_id,
+            scale=self._resolve_scale(symbol),
         )
         return await self._send_encrypted(
             "modify",
@@ -669,18 +720,123 @@ class GodarkRestClient:
             order_id=str(order_id),
         )
 
+    def _remember_order_status(self, order_id: str, status: str) -> None:
+        normalized = _normalize_order_status(status)
+        if order_id and normalized:
+            self._order_status_cache[str(order_id)] = normalized
+
+    def _order_view_from_row(self, raw: dict[str, Any], row: Any) -> dict[str, Any]:
+        """Merge a decrypted open-order row onto the REST pointer."""
+        view = dict(raw)
+        view["order_id"] = str(row.order_id)
+        view["symbol_id"] = row.symbol_id
+        view["status"] = _normalize_order_status(row.status)
+        view["price"] = row.price
+        view["quantity"] = row.quantity
+        view["remaining_qty"] = row.remaining_qty
+        view["filled_qty"] = row.filled_qty
+        view["leverage"] = row.leverage
+        if row.side:
+            view["side"] = row.side
+        if row.order_type:
+            view["order_type"] = row.order_type
+        return view
+
+    async def _history_status(self, order_id: str) -> str:
+        if not self._bearer:
+            return ""
+        try:
+            page = await self._http.get_order_history(bearer=self._bearer, limit=50)
+        except Exception as exc:  # noqa: BLE001 — history is a terminal-status fallback
+            _LOG.debug("order history lookup failed for %s: %s", order_id, exc)
+            return ""
+        rows = page.get("rows") if isinstance(page, dict) else None
+        if not isinstance(rows, list):
+            return ""
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("order_id", "")) != str(order_id):
+                continue
+            return _normalize_order_status(row.get("terminal_status") or row.get("status"))
+        return ""
+
+    async def _with_decrypted_status(self, raw: dict[str, Any], *, order_id: str) -> dict[str, Any]:
+        """Fill ``status`` for a Zone-A ``{encrypted, hint, order_id}`` pointer.
+
+        The edge does not put order state on GET. Status comes from the same
+        encrypted open-orders read used by :meth:`get_open_orders`, then from a
+        decrypted ack cache, then from terminal history.
+        """
+        oid = str(raw.get("order_id") or order_id or "")
+        existing = _normalize_order_status(raw.get("status") or raw.get("order_status"))
+        if existing:
+            if oid:
+                self._remember_order_status(oid, existing)
+            if existing != raw.get("status"):
+                merged = dict(raw)
+                merged["status"] = existing
+                return merged
+            return raw
+        if not raw.get("encrypted") and not raw.get("encrypted_body") and not raw.get("ciphertext"):
+            return raw
+
+        if oid:
+            try:
+                snap = await self.get_open_orders()
+            except Exception as exc:  # noqa: BLE001 — fall through to cache / history
+                _LOG.debug("open-orders decrypt failed while reading %s: %s", oid, exc)
+                snap = None
+            if snap is not None:
+                for row in snap.rows:
+                    if str(row.order_id) == oid and row.status:
+                        view = self._order_view_from_row(raw, row)
+                        self._remember_order_status(oid, view["status"])
+                        return view
+
+        cached = _normalize_order_status(self._order_status_cache.get(oid, ""))
+        if cached in _TERMINAL_ORDER_STATUSES:
+            view = dict(raw)
+            view["order_id"] = oid
+            view["status"] = cached
+            return view
+
+        historic = await self._history_status(oid) if oid else ""
+        if historic:
+            self._remember_order_status(oid, historic)
+            view = dict(raw)
+            view["order_id"] = oid
+            view["status"] = historic
+            return view
+        return raw
+
     async def get_order(self, order_id: str) -> dict[str, Any]:
         if not self._bearer:
             raise SessionError("not authenticated – call connect() first")
-        return await self._http.get_order(bearer=self._bearer, order_id=order_id)
+        try:
+            raw = await self._http.get_order(bearer=self._bearer, order_id=order_id)
+        except httpx.HTTPStatusError as exc:
+            # Terminal and unknown ids are 403. Keep polling via the decrypted
+            # book, the cancel-ack cache, and order history.
+            if exc.response.status_code not in (403, 404):
+                raise
+            raw = {"encrypted": True, "order_id": str(order_id)}
+        return await self._with_decrypted_status(raw, order_id=str(order_id))
 
     async def get_order_by_client_id(self, client_order_id: str) -> dict[str, Any]:
         if not self._bearer:
             raise SessionError("not authenticated – call connect() first")
-        return await self._http.get_order_by_client_order_id(
+        raw = await self._http.get_order_by_client_order_id(
             bearer=self._bearer,
             client_order_id=client_order_id,
         )
+        order_id = str(raw.get("order_id") or "")
+        if order_id:
+            self._local_coid_index[client_order_id] = order_id
+        view = await self._with_decrypted_status(raw, order_id=order_id)
+        view = dict(view)
+        view.setdefault("client_order_id", client_order_id)
+        return view
 
     async def await_terminal_status(
         self,
@@ -690,11 +846,10 @@ class GodarkRestClient:
         poll_interval_sec: float = 0.25,
     ) -> dict[str, Any]:
         deadline = asyncio.get_event_loop().time() + timeout_sec
-        terminal = {"FILLED", "CANCELLED", "REJECTED"}
         while asyncio.get_event_loop().time() < deadline:
             row = await self.get_order(order_id)
-            st = str(row.get("status", "")).upper()
-            if st in terminal:
+            st = _normalize_order_status(row.get("status"))
+            if st in _TERMINAL_ORDER_STATUSES:
                 return row
             await asyncio.sleep(poll_interval_sec)
         raise TimeoutError(f"order {order_id} did not reach terminal status within {timeout_sec}s")
@@ -717,7 +872,7 @@ class GodarkRestClient:
         lev = max(1, int(leverage))
         corr_id = _new_correlation_id()
         plaintext = _proto.build_update_leverage_proto(
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             symbol_id=symbol_id,
             leverage=lev,
             correlation_id_bytes=corr_id,
@@ -744,11 +899,12 @@ class GodarkRestClient:
         corr_id = _new_correlation_id()
         plaintext = _proto.build_mass_quote_proto(
             symbol_id=symbol_id,
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             legs=legs,
             correlation_id_bytes=corr_id,
             leverage=leverage,
             post_only=post_only,
+            scale=self._resolve_scale(symbol),
         )
         sealed, raw = await self._send_encrypted_envelope(
             "mass_quote",
@@ -766,7 +922,7 @@ class GodarkRestClient:
         corr_id = _new_correlation_id()
         plaintext = _proto.build_batch_cancel_proto(
             symbol_id=symbol_id,
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             order_ids=order_ids,
             correlation_id_bytes=corr_id,
         )
@@ -785,9 +941,10 @@ class GodarkRestClient:
         corr_id = _new_correlation_id()
         plaintext = _proto.build_batch_modify_proto(
             symbol_id=symbol_id,
-            user_uuid=self._user_uuid_bytes(),
+            account=self._account_bytes(),
             legs=legs,
             correlation_id_bytes=corr_id,
+            scale=self._resolve_scale(symbol),
         )
         sealed, raw = await self._send_encrypted_envelope(
             "batch_modify",

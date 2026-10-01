@@ -3,11 +3,10 @@
 This reference describes the API and workflow used by the market-maker-facing
 distribution in this repository.
 
-The MM examples use WebSocket encrypted trading via `godark.GodarkClient`.
-Encrypted REST trading is not supported — all order flow (place / modify /
-cancel / mass-quote) runs over the HPKE WebSocket client. Standalone
-market-data clients exist in the upstream SDK but are excluded from this
-distribution.
+The primary integration is encrypted WebSocket trading via
+`godark.GodarkClient`, which also provides private push streams. The
+distribution additionally includes `godark.GodarkRestClient` for one-shot HPKE
+REST trading, encrypted snapshots, order lookup, and public market-data reads.
 
 Order placement support in this MM distribution is limited to `MARKET` and
 `LIMIT`.
@@ -24,14 +23,15 @@ async def main():
     async with GodarkClient(
         api_key_id=os.environ["GODARK_API_KEY_ID"],
         api_secret=os.environ["GODARK_API_SECRET"],
+        passphrase=os.environ["GODARK_PASSPHRASE"],
         base_url=os.environ.get("GODARK_EDGE_URL", "wss://api.godark-dex.com"),
     ) as client:
         ack = await client.place_order(
             "BTC-USDC-PERP",
             Side.SELL,
             OrderType.LIMIT,
-            0.01,
-            price=999_999.0,
+            "0.01",
+            price="999999.0",
             time_in_force=TimeInForce.GTC,
         )
         await client.cancel_order(ack.order_id, "BTC-USDC-PERP")
@@ -41,6 +41,13 @@ asyncio.run(main())
 
 `base_url=` may omit the `/ws/v1` suffix — the SDK appends it.
 
+`connect()` exchanges the API key for a REST `client_credentials` access token
+(`POST /auth/token`) and sends that token on WebSocket `op: login`. The login
+frame is not `key:secret:passphrase`.
+
+`/ws/v1` subscribe channels are `orders`, `positions`, `volume`,
+`open_interest`, and `funding_rate`. Trades and L2 are not on this socket.
+
 ## Configuration
 
 The MM examples expect:
@@ -48,7 +55,7 @@ The MM examples expect:
 - `GODARK_API_KEY_ID` (required)
 - `GODARK_API_SECRET` (required)
 - `GODARK_EDGE_URL` (optional, defaults to `wss://api.godark-dex.com`)
-- `GODARK_USER_UUID` (optional fallback when the auth response omits a user id; some local edges need this)
+- `GODARK_ACCOUNT` (optional base58 32-byte fallback when auth omits `account`)
 
 Use `.env.example` as the template for your local `.env`. The `examples/dotenv.py`
 helper loads it from the repo root; OS environment variables win over `.env` values.
@@ -65,7 +72,7 @@ helper loads it from the repo root; OS environment variables win over `.env` val
 | `disconnect` | `async def disconnect() -> None` | Graceful disconnect; cancels pending reconnect tasks |
 | `logout` | `async def logout() -> None` | Send docs `op: logout` when supported, then disconnect |
 | `__aenter__` / `__aexit__` | `async with GodarkClient(...) as c:` | Async-context wrapper around `connect()` / `disconnect()` |
-| `user_uuid` | `@property -> str \| None` | Authenticated user id (set after `connect`) |
+| `account` | `@property -> str \| None` | Authenticated base58 account (set after `connect`) |
 | `account_id` | `@property -> str \| None` | Docs `op: login` account identifier when supplied by the edge |
 | `login_session_id` | `@property -> str \| None` | Docs `op: login` session identifier when supplied by the edge |
 | `token_expires_at` | `@property -> str \| None` | Docs `op: login` token expiry timestamp when supplied by the edge |
@@ -74,8 +81,9 @@ helper loads it from the repo root; OS environment variables win over `.env` val
 `GodarkClient.__init__` keyword arguments:
 
 - `api_key_id`, `api_secret` — required pair (or single `api_key="<id>:<secret>"` token).
+- `passphrase` — required API-key passphrase.
 - `base_url` — host-only WebSocket origin; SDK appends `/ws/v1`. Falls back to `GODARK_EDGE_URL` / `GDX_EDGE_URL` then production.
-- `user_uuid` — fallback used when the edge auth response omits a user id; falls back to `GODARK_USER_UUID` / `GDX_USER_UUID`.
+- `account` — fallback used when auth omits the account; falls back to `GODARK_ACCOUNT` / `GDX_ACCOUNT`.
 - `hpke_static_public_key_hex` — pinned sequencer HPKE static key (64 hex); defaults to `GDX_HPKE_STATIC_PUBLIC_KEY` and aliases.
 - `auto_reconnect=True` — automatically reconnect after transport drops.
 - `symbol_map=None` — override the default symbol-name → numeric-id table.
@@ -84,9 +92,15 @@ helper loads it from the repo root; OS environment variables win over `.env` val
 
 ### Trading commands
 
+Prices and sizes (`quantity`, `price`, `min_fill_size`, `quote_notional`,
+`trigger_price`, TP/SL, `new_price` / `new_quantity` / `new_trigger_price`,
+mass-quote legs) are **decimal strings only** (e.g. `"67500.0"`, `"0.01"`).
+Passing `int`, `float`, or `bool` raises `TypeError` — there is no numeric
+coercion before seal.
+
 | Method | Signature | Purpose |
 |--------|-----------|---------|
-| `place_order` | `async def place_order(symbol, side, order_type, quantity, price=None, time_in_force="GTC", aon=False, min_fill_size=None, expiry_time=None) -> OrderAck` | Place encrypted order; raises `OrderError` on rejection |
+| `place_order` | `async def place_order(symbol, side, order_type, quantity=None, price=None, time_in_force="GTC", aon=False, min_fill_size=None, expiry_time=None, confirmation="book", options=None, client_order_id=None) -> OrderAck` | Place encrypted order; raises `OrderError` on rejection |
 | `update_leverage` | `async def update_leverage(symbol: str, leverage: int) -> OrderAck` | Set per-symbol account leverage (place/mass_quote inherit this) |
 | `cancel_order` | `async def cancel_order(order_id: str, symbol: str = "BTC-USDC-PERP") -> OrderAck` | Cancel by numeric id (passed as string) |
 | `modify_order` | `async def modify_order(order_id: str, symbol="BTC-USDC-PERP", new_price=None, new_quantity=None, new_trigger_price=None) -> OrderAck` | Amend price, quantity, and/or stop trigger |
@@ -97,16 +111,23 @@ helper loads it from the repo root; OS environment variables win over `.env` val
 as an integer internally — pass `str(ack.order_id)` rather than the dataclass
 field bare if you re-stringify it.
 
+A `client_order_id` is registered only after a successful WebSocket place
+(`POST /api/v1/orders/_register_coid`). A REST place does not register it.
+Lookup uses the edge mapping from that WebSocket registration. A process-local
+dict is not the registration path.
+
+`slippage_bps` is accepted only on `MARKET` and `STOP_MARKET`. `PEG` is not
+post-only; do not set `post_only` on a pegged order.
+
 ### Streams (subscribe / unsubscribe)
 
 | Method | Signature | Purpose |
 |--------|-----------|---------|
-| `subscribe` | `async def subscribe(channels=("orders", "positions")) -> None` | Subscribe to private push channels |
+| `subscribe` | `async def subscribe(channels=("orders", "positions")) -> None` | Subscribe to `/ws/v1` channels |
 | `unsubscribe` | `async def unsubscribe(channels=("orders", "positions")) -> None` | Unsubscribe a subset |
 
-Exact channel strings match the docs wire `{channel: …}` payloads; subscribe
-according to upstream edge documentation when enabling additional sequencer
-streams.
+Channel names on `/ws/v1`: `orders`, `positions`, `volume`, `open_interest`,
+`funding_rate`. This socket does not carry trades or L2.
 
 ### Callbacks
 
@@ -212,7 +233,7 @@ strings to preserve sequencer-side decimal precision.
 ### OrderUpdate
 
 Lifecycle event for one order. Fields:
-`order_id`, `user_uuid`, `symbol_id` (int), `side` (`Side`), `status`
+`order_id`, `account`, `symbol_id` (int), `side` (`Side`), `status`
 (`OrderStatus`), `update_type` (`OrderUpdateType`), `price`, `quantity`,
 `filled_qty`, `remaining_qty`, `cum_fill`, `cancel_reason`
 (`CancelReason | None`), `reject_reason` (`str | None`), `correlation_id`,
@@ -224,7 +245,7 @@ sequencer includes them.
 ### PositionUpdate
 
 Position lifecycle event. Fields:
-`user_uuid`, `symbol_id` (int), `side` (`Side`), `update_type`
+`account`, `symbol_id` (int), `side` (`Side`), `update_type`
 (`PositionUpdateType`), `size`, `entry_price`, `previous_size`, `fill_price`,
 `fill_qty`, `correlation_id`, `timestamp`.
 
@@ -237,7 +258,7 @@ Decrease / Close / Snapshot transitions.
 `PositionRow`: `symbol_id`, `side`, `size`, `entry_price`, `leverage`,
 `mark_price`, `unrealized_pnl`, `notional`, `mark_publish_time_sec`.
 
-`PositionsSnapshot`: `user_uuid`, `rows: tuple[PositionRow, …]`,
+`PositionsSnapshot`: `account`, `rows: tuple[PositionRow, …]`,
 `server_timestamp`, `source` (`PositionsSnapshotSource`), `correlation_id`.
 
 ### Other push payloads
@@ -268,7 +289,7 @@ name (e.g. `Side.SELL == "SELL"`, `str(OrderType.LIMIT) == "OrderType.LIMIT"`,
 - `PositionsSnapshotSource`: `UNSPECIFIED`, `INITIAL`, `PERIODIC`, `EVENT`
 - `SettlementBatchStatus`: `UNSPECIFIED`, `SUBMITTED`, `CONFIRMED`, `FAILED`
 
-`PlaceOrderOptions` (`options` on `place_order`) includes `reduce_only`, `post_only`, `stp_mode`, `peg_offset_bps`, `trigger_price`, `take_profit_price`, and `stop_loss_price`. `PEG` pegs to the Pyth oracle mark.
+`PlaceOrderOptions` (`options` on `place_order`) includes `reduce_only`, `post_only`, `stp_mode`, `peg_offset_bps`, `trigger_price`, `take_profit_price`, `stop_loss_price`, `slippage_bps`, and `quote_notional`. `trigger_price`, `take_profit_price`, `stop_loss_price`, and `quote_notional` are decimal strings; `int` / `float` / `bool` raise `TypeError`. `slippage_bps` applies only to `MARKET` and `STOP_MARKET` (integer basis points). Omit it to use the venue max walk cap. Use `quote_notional` instead of `quantity` for quote-sized orders; exactly one size intent is required. `PEG` pegs to the Pyth oracle mark and is not a post-only order.
 
 ## Errors
 
@@ -327,7 +348,7 @@ Force install from the vendored sources (debugging) with
 To use `godark` from your own project, install the wheel directly:
 
 ```bash
-pip install /path/to/wheels/godark-0.1.0-py3-none-any.whl
+pip install /path/to/wheels/godark-0.2.0-py3-none-any.whl
 ```
 
 ```python
@@ -357,6 +378,40 @@ Maintainers refresh `sdk/` from a sibling upstream checkout:
 ./scripts/refresh_sdk.sh /path/to/gdx-python-sdk
 ```
 
-## RestClient example
+## GodarkRestClient API
 
-`GodarkRestClient` is exercised by `rest_client_example` / `rest-client-example`: REST auth, `/auth/me`, leverage read, and public funding/OI/volume GETs. Encrypted place/cancel/modify/update-leverage remain WebSocket-only via `GodarkClient`.
+Use `GodarkClient` as the primary client when you need private real-time
+updates. `GodarkRestClient` supports API-key authentication and these actual
+REST operations:
+
+- Encrypted snapshots: `get_open_orders()`, `get_positions()`, `get_account()`
+- Encrypted trading: `place_order()`, `cancel_order()`,
+  `cancel_order_by_client_id()`, `modify_order()`, `update_leverage()`,
+  `mass_quote()`, `batch_cancel()`, and `batch_modify()`
+- Order reads: `get_order()`, `get_order_by_client_id()`, and
+  `await_terminal_status()`
+- Public reads (no `connect()` required): `get_funding_rates()`,
+  `get_open_interest()`, and `get_volume()`
+
+Construct with `rest_base_url=` (not `base_url=`). `connect()` is
+`client_credentials` and stores the access token. `place_order` is
+keyword-only after `side`:
+
+```python
+await client.place_order(
+    "BTC-USDC-PERP",
+    "BUY",
+    type="LIMIT",
+    quantity="0.01",
+    price="73000.0",
+)
+```
+
+Passing `client_order_id` on this call does not register it. Registration
+happens only after a successful WebSocket place.
+
+After `connect()`, `account` and `account_str` expose the canonical base58
+account. The constructor's `user_uuid=` argument and `user_uuid` property are
+deprecated compatibility aliases only; new integrations should use `account=`.
+`full_trader_rest.py` demonstrates encrypted snapshots and place/modify/cancel.
+Read positions with `get_positions()` after `connect()`.
