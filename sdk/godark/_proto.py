@@ -16,9 +16,12 @@ from gdx.health.v1 import health_pb2  # noqa: E402
 from gdx.sequencer.v1 import sequencer_pb2  # noqa: E402
 
 from . import _identity  # noqa: E402
+from ._decimal import format_decimal  # noqa: E402
+from ._symbols import InstrumentDecimals  # noqa: E402
 from .enums import (  # noqa: E402
     _CANCEL_REASON_FROM_PROTO,
     _ORDER_STATUS_FROM_PROTO,
+    _ORDER_TYPE_FROM_PROTO,
     _ORDER_TYPE_TO_PROTO,
     _ORDER_UPDATE_TYPE_FROM_PROTO,
     _REQUEST_TYPE_TO_PROTO,
@@ -29,6 +32,9 @@ from .enums import (  # noqa: E402
     _TIME_IN_FORCE_TO_PROTO,
     Side,
 )
+
+# Offline-safe defaults when callers omit instrument scale (unit tests).
+_DEFAULT_SCALE = InstrumentDecimals(price_decimals=8, quantity_decimals=8)
 from .types import (  # noqa: E402
     AccountMarginSummary,
     AccountMarginUpdate,
@@ -189,9 +195,7 @@ def _parse_snapshot_variant(
     return variant or "unknown", {"type": variant or "unknown"}
 
 
-def _decode_rest_variant(
-    variant: str, payload: bytes, *, full_data: bytes
-) -> tuple[str, Any]:
+def _decode_rest_variant(variant: str, payload: bytes, *, full_data: bytes) -> tuple[str, Any]:
     count_ack_configs: dict[str, tuple[type, str, str]] = {
         "cancel_all_ack": (sequencer_pb2.CancelAllAck, "cancelled", "cancelled_order_ids"),
         "close_all_ack": (sequencer_pb2.CloseAllAck, "closed", "close_order_ids"),
@@ -207,9 +211,7 @@ def _decode_rest_variant(
     return _parse_snapshot_variant(variant, payload, full_data=full_data)
 
 
-def _parse_node_response_with_expected(
-    data: bytes, expected: str | None
-) -> tuple[str, Any]:
+def _parse_node_response_with_expected(data: bytes, expected: str | None) -> tuple[str, Any]:
     variant, payload = _resolve_rest_payload(data, expected)
     try:
         return _decode_rest_variant(variant, payload, full_data=data)
@@ -219,11 +221,11 @@ def _parse_node_response_with_expected(
         raise
 
 
-def _uuid_bytes_to_str(raw: bytes) -> str:
-    """Convert 16 raw UUID bytes to a standard hyphenated UUID string."""
-    if len(raw) == _identity.USER_UUID_LEN:
-        return _identity.bytes_to_uuid(raw)
-    return "00000000-0000-0000-0000-000000000000"
+def _account_bytes_to_str(raw: bytes) -> str:
+    """Convert 32 account bytes to canonical base58."""
+    if len(raw) == _identity.ACCOUNT_LEN:
+        return _identity.bytes_to_account(raw)
+    return ""
 
 
 # Maximum legs / ids accepted in a single mass-quote, batch-cancel, or
@@ -241,21 +243,27 @@ def build_place_order_proto(
     symbol_id: int,
     side: str,
     order_type: str,
-    quantity: float,
-    user_uuid: bytes,
-    price: float | None = None,
+    quantity: str | None,
+    account: bytes,
+    price: str | None = None,
     time_in_force: str = "GTC",
     aon: bool = False,
-    min_fill_size: float | None = None,
+    min_fill_size: str | None = None,
     expiry_time: int | None = None,
     correlation_id_bytes: bytes | None = None,
     options: PlaceOrderOptions | None = None,
     timestamp: int = 0,
+    scale: InstrumentDecimals | None = None,
 ) -> bytes:
-    """Build a PlaceOrderInput wrapped in EdgeSequencerRequest, return serialized bytes."""
+    """Build a bare PlaceOrderInput for HPKE sealing; return serialized bytes."""
     del timestamp  # legacy param; PlaceOrderInput no longer carries timestamp
+    scale = scale or _DEFAULT_SCALE
     opts = options or PlaceOrderOptions()
+    if (quantity is None) == (opts.quote_notional is None):
+        raise ValueError("exactly one of quantity or options.quote_notional is required")
     if aon and min_fill_size is None:
+        if quantity is None:
+            raise ValueError("aon requires base quantity, not quote_notional")
         min_fill_size = quantity
     stp = opts.stp_mode.value if hasattr(opts.stp_mode, "value") else str(opts.stp_mode)
     place = sequencer_pb2.PlaceOrderInput(
@@ -264,19 +272,22 @@ def build_place_order_proto(
         order_type=_ORDER_TYPE_TO_PROTO[
             order_type if isinstance(order_type, str) else order_type.value
         ],
-        quantity=quantity,
         time_in_force=_TIME_IN_FORCE_TO_PROTO[
             time_in_force if isinstance(time_in_force, str) else time_in_force.value
         ],
-        user_uuid=user_uuid,
+        account=account,
         stp_mode=_STP_MODE_TO_PROTO.get(stp, 0),
         reduce_only=opts.reduce_only,
         post_only=opts.post_only,
     )
+    if quantity is not None:
+        place.quantity = format_decimal(quantity, scale.quantity_decimals)
+    if opts.quote_notional is not None:
+        place.quote_notional = format_decimal(opts.quote_notional, scale.price_decimals)
     if price is not None:
-        place.price = price
+        place.price = format_decimal(price, scale.price_decimals)
     if min_fill_size is not None:
-        place.min_fill_size = min_fill_size
+        place.min_fill_size = format_decimal(min_fill_size, scale.quantity_decimals)
     if expiry_time is not None:
         place.expiry_time = expiry_time
     if correlation_id_bytes is not None:
@@ -284,188 +295,190 @@ def build_place_order_proto(
     if opts.peg_offset_bps is not None:
         place.peg_offset_bps = opts.peg_offset_bps
     if opts.trigger_price is not None:
-        place.trigger_price = opts.trigger_price
+        place.trigger_price = format_decimal(opts.trigger_price, scale.price_decimals)
     if opts.take_profit_price is not None:
-        place.take_profit_price = opts.take_profit_price
+        place.take_profit_price = format_decimal(opts.take_profit_price, scale.price_decimals)
     if opts.stop_loss_price is not None:
-        place.stop_loss_price = opts.stop_loss_price
+        place.stop_loss_price = format_decimal(opts.stop_loss_price, scale.price_decimals)
+    if opts.slippage_bps is not None:
+        place.slippage_bps = opts.slippage_bps
 
-    req = sequencer_pb2.EdgeSequencerRequest(place=place)
-    return req.SerializeToString()
+    return place.SerializeToString()
 
 
 def build_cancel_order_proto(
     order_id: int,
-    user_uuid: bytes,
+    account: bytes,
     symbol_id: int,
     correlation_id_bytes: bytes,
 ) -> bytes:
-    """Build a CancelOrderInput wrapped in EdgeSequencerRequest, return serialized bytes."""
+    """Build a bare CancelOrderInput for HPKE sealing; return serialized bytes."""
     cancel = sequencer_pb2.CancelOrderInput(
         order_id=order_id,
         symbol_id=symbol_id,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
-        user_uuid=user_uuid,
+        account=account,
     )
-    req = sequencer_pb2.EdgeSequencerRequest(cancel=cancel)
-    return req.SerializeToString()
+    return cancel.SerializeToString()
 
 
 def build_modify_order_proto(
     order_id: int,
-    user_uuid: bytes,
+    account: bytes,
     symbol_id: int,
-    new_price: float | None = None,
-    new_quantity: float | None = None,
-    new_trigger_price: float | None = None,
+    new_price: str | None = None,
+    new_quantity: str | None = None,
+    new_trigger_price: str | None = None,
     correlation_id_bytes: bytes = b"",
+    scale: InstrumentDecimals | None = None,
 ) -> bytes:
-    """Build a ModifyOrderInput wrapped in EdgeSequencerRequest, return serialized bytes."""
+    """Build a bare ModifyOrderInput for HPKE sealing; return serialized bytes."""
+    scale = scale or _DEFAULT_SCALE
     modify = sequencer_pb2.ModifyOrderInput(
         order_id=order_id,
         symbol_id=symbol_id,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
-        user_uuid=user_uuid,
+        account=account,
     )
     if new_price is not None:
-        modify.new_price = new_price
+        modify.new_price = format_decimal(new_price, scale.price_decimals)
     if new_quantity is not None:
-        modify.new_quantity = new_quantity
+        modify.new_quantity = format_decimal(new_quantity, scale.quantity_decimals)
     if new_trigger_price is not None:
-        modify.new_trigger_price = new_trigger_price
+        modify.new_trigger_price = format_decimal(new_trigger_price, scale.price_decimals)
 
-    req = sequencer_pb2.EdgeSequencerRequest(modify=modify)
-    return req.SerializeToString()
+    return modify.SerializeToString()
 
 
-def build_get_open_orders_proto(user_uuid: bytes, correlation_id_bytes: bytes = b"") -> bytes:
-    """Build GetOpenOrdersRequest wrapped in EdgeSequencerRequest."""
+def build_get_open_orders_proto(account: bytes, correlation_id_bytes: bytes = b"") -> bytes:
+    """Build a bare GetOpenOrdersRequest for HPKE sealing."""
     inner = sequencer_pb2.GetOpenOrdersRequest(
-        user_uuid=user_uuid,
+        account=account,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
     )
-    return sequencer_pb2.EdgeSequencerRequest(get_open_orders=inner).SerializeToString()
+    return inner.SerializeToString()
 
 
-def build_get_positions_proto(user_uuid: bytes, correlation_id_bytes: bytes = b"") -> bytes:
-    """Build GetPositionsRequest wrapped in EdgeSequencerRequest."""
+def build_get_positions_proto(account: bytes, correlation_id_bytes: bytes = b"") -> bytes:
+    """Build a bare GetPositionsRequest for HPKE sealing."""
     inner = sequencer_pb2.GetPositionsRequest(
-        user_uuid=user_uuid,
+        account=account,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
     )
-    return sequencer_pb2.EdgeSequencerRequest(get_positions=inner).SerializeToString()
+    return inner.SerializeToString()
 
 
-def build_get_account_proto(user_uuid: bytes, correlation_id_bytes: bytes = b"") -> bytes:
-    """Build GetAccountRequest wrapped in EdgeSequencerRequest."""
+def build_get_account_proto(account: bytes, correlation_id_bytes: bytes = b"") -> bytes:
+    """Build a bare GetAccountRequest for HPKE sealing."""
     inner = sequencer_pb2.GetAccountRequest(
-        user_uuid=user_uuid,
+        account=account,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
     )
-    return sequencer_pb2.EdgeSequencerRequest(get_account=inner).SerializeToString()
+    return inner.SerializeToString()
 
 
 def build_update_leverage_proto(
-    user_uuid: bytes,
+    account: bytes,
     symbol_id: int,
     leverage: int,
     correlation_id_bytes: bytes = b"",
 ) -> bytes:
-    """Build an UpdateLeverageRequest wrapped in EdgeSequencerRequest, return serialized bytes."""
+    """Build a bare UpdateLeverageRequest for HPKE sealing; return serialized bytes."""
     lev = max(1, int(leverage))
     update = sequencer_pb2.UpdateLeverageRequest(
-        user_uuid=user_uuid,
+        account=account,
         symbol_id=symbol_id,
         leverage=lev,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
     )
-    req = sequencer_pb2.EdgeSequencerRequest(update_leverage=update)
-    return req.SerializeToString()
+    return update.SerializeToString()
 
 
 def build_cancel_all_proto(
     symbol_id: int | None,
-    user_uuid: bytes,
+    account: bytes,
     correlation_id_bytes: bytes,
 ) -> bytes:
-    """Build CancelAllInput wrapped in EdgeSequencerRequest."""
+    """Build a bare CancelAllInput for HPKE sealing."""
     cancel_all = sequencer_pb2.CancelAllInput(
-        user_uuid=user_uuid,
+        account=account,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
     )
     if symbol_id is not None:
         cancel_all.symbol_id = symbol_id
-    return sequencer_pb2.EdgeSequencerRequest(cancel_all=cancel_all).SerializeToString()
+    return cancel_all.SerializeToString()
 
 
 def build_close_all_proto(
     symbol_id: int | None,
-    user_uuid: bytes,
+    account: bytes,
     correlation_id_bytes: bytes,
 ) -> bytes:
-    """Build CloseAllInput wrapped in EdgeSequencerRequest."""
+    """Build a bare CloseAllInput for HPKE sealing."""
     close_all = sequencer_pb2.CloseAllInput(
-        user_uuid=user_uuid,
+        account=account,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
     )
     if symbol_id is not None:
         close_all.symbol_id = symbol_id
-    return sequencer_pb2.EdgeSequencerRequest(close_all=close_all).SerializeToString()
+    return close_all.SerializeToString()
 
 
 def build_reverse_proto(
     symbol_id: int,
-    user_uuid: bytes,
+    account: bytes,
     correlation_id_bytes: bytes,
 ) -> bytes:
-    """Build ReverseInput wrapped in EdgeSequencerRequest."""
+    """Build a bare ReverseInput for HPKE sealing."""
     reverse = sequencer_pb2.ReverseInput(
         symbol_id=symbol_id,
-        user_uuid=user_uuid,
+        account=account,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
     )
-    return sequencer_pb2.EdgeSequencerRequest(reverse=reverse).SerializeToString()
+    return reverse.SerializeToString()
 
 
 def build_amend_tpsl_proto(
-    user_uuid: bytes,
+    account: bytes,
     order_id: int,
     correlation_id_bytes: bytes,
     *,
-    take_profit_price: float | None = None,
-    stop_loss_price: float | None = None,
+    take_profit_price: str | None = None,
+    stop_loss_price: str | None = None,
     symbol_id: int | None = None,
     position_side: str | Side | None = None,
+    scale: InstrumentDecimals | None = None,
 ) -> bytes:
-    """Build AmendTpslRequest wrapped in EdgeSequencerRequest."""
+    """Build a bare AmendTpslRequest for HPKE sealing."""
+    scale = scale or _DEFAULT_SCALE
     amend = sequencer_pb2.AmendTpslRequest(
-        user_uuid=user_uuid,
+        account=account,
         order_id=order_id,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
     )
     if take_profit_price is not None:
-        amend.take_profit_price = take_profit_price
+        amend.take_profit_price = format_decimal(take_profit_price, scale.price_decimals)
     if stop_loss_price is not None:
-        amend.stop_loss_price = stop_loss_price
+        amend.stop_loss_price = format_decimal(stop_loss_price, scale.price_decimals)
     if symbol_id is not None:
         amend.symbol_id = symbol_id
     if position_side is not None:
         side = position_side if isinstance(position_side, str) else position_side.value
         amend.position_side = _SIDE_TO_PROTO[side]
-    return sequencer_pb2.EdgeSequencerRequest(amend_tpsl=amend).SerializeToString()
+    return amend.SerializeToString()
 
 
 def build_cancel_tpsl_proto(
-    user_uuid: bytes,
+    account: bytes,
     order_id: int,
     correlation_id_bytes: bytes,
     *,
     symbol_id: int | None = None,
     position_side: str | Side | None = None,
 ) -> bytes:
-    """Build CancelTpslRequest wrapped in EdgeSequencerRequest."""
+    """Build a bare CancelTpslRequest for HPKE sealing."""
     cancel = sequencer_pb2.CancelTpslRequest(
-        user_uuid=user_uuid,
+        account=account,
         order_id=order_id,
         correlation_id=correlation_id_body_bytes(correlation_id_bytes),
     )
@@ -474,22 +487,24 @@ def build_cancel_tpsl_proto(
     if position_side is not None:
         side = position_side if isinstance(position_side, str) else position_side.value
         cancel.position_side = _SIDE_TO_PROTO[side]
-    return sequencer_pb2.EdgeSequencerRequest(cancel_tpsl=cancel).SerializeToString()
+    return cancel.SerializeToString()
 
 
 def build_mass_quote_proto(
     symbol_id: int,
-    user_uuid: bytes,
+    account: bytes,
     legs: list[dict[str, Any]],
     correlation_id_bytes: bytes | None = None,
     leverage: int = 1,
     post_only: bool | None = None,
+    scale: InstrumentDecimals | None = None,
 ) -> bytes:
-    """Build a MassQuoteInput wrapped in EdgeSequencerRequest, return serialized bytes.
+    """Build a bare MassQuoteInput for HPKE sealing; return serialized bytes.
 
-    Each leg dict supports: ``side`` (str/Side), ``price`` (float), ``quantity``
-    (float), ``cancel_order_id`` (int|None, 0/None = pure place), ``time_in_force``
-    (str, default GTC), ``expiry_time`` (int|None), ``correlation_id`` (bytes|None).
+    Each leg dict supports: ``side`` (str/Side), ``price`` (decimal str),
+    ``quantity`` (decimal str), ``cancel_order_id`` (int|None, 0/None = pure
+    place), ``time_in_force`` (str, default GTC), ``expiry_time`` (int|None),
+    ``correlation_id`` (bytes|None).
 
     ``post_only`` is the batch-level flag: ``None`` encodes post-only (``True``);
     ``False`` enables the relaxed path where a crossing leg takes liquidity up
@@ -498,13 +513,14 @@ def build_mass_quote_proto(
     Raises ``ValueError`` if ``legs`` is empty or has more than 20 entries.
     """
     del leverage  # legacy param; MassQuoteInput no longer carries leverage
+    scale = scale or _DEFAULT_SCALE
     if not legs:
         raise ValueError("mass quote requires at least one leg")
     if len(legs) > _MAX_BATCH_LEGS:
         raise ValueError(f"mass quote accepts at most {_MAX_BATCH_LEGS} legs, got {len(legs)}")
     mq = sequencer_pb2.MassQuoteInput(
         symbol_id=symbol_id,
-        user_uuid=user_uuid,
+        account=account,
     )
     if correlation_id_bytes is not None:
         mq.correlation_id = correlation_id_body_bytes(correlation_id_bytes)
@@ -515,8 +531,8 @@ def build_mass_quote_proto(
         tif = leg.get("time_in_force", "GTC")
         pb_leg = mq.legs.add()
         pb_leg.side = _SIDE_TO_PROTO[side if isinstance(side, str) else side.value]
-        pb_leg.price = float(leg["price"])
-        pb_leg.quantity = float(leg["quantity"])
+        pb_leg.price = format_decimal(leg["price"], scale.price_decimals)
+        pb_leg.quantity = format_decimal(leg["quantity"], scale.quantity_decimals)
         pb_leg.time_in_force = _TIME_IN_FORCE_TO_PROTO[tif if isinstance(tif, str) else tif.value]
         cancel_id = leg.get("cancel_order_id")
         # cancel_order_id is plain uint64; 0 means "pure place" (no cancel target).
@@ -529,17 +545,16 @@ def build_mass_quote_proto(
         leg_cid = leg.get("correlation_id")
         pb_leg.correlation_id = leg_cid if leg_cid else uuid.uuid4().bytes
 
-    req = sequencer_pb2.EdgeSequencerRequest(mass_quote=mq)
-    return req.SerializeToString()
+    return mq.SerializeToString()
 
 
 def build_batch_cancel_proto(
     symbol_id: int,
-    user_uuid: bytes,
+    account: bytes,
     order_ids: list[int],
     correlation_id_bytes: bytes | None = None,
 ) -> bytes:
-    """Build a BatchCancelInput wrapped in EdgeSequencerRequest, return serialized bytes.
+    """Build a bare BatchCancelInput for HPKE sealing; return serialized bytes.
 
     ``order_ids`` is a list of resting order ids (plain uint64) to cancel in one
     fanned-out batch. Up to 20 ids per request, single symbol. Cancels are pure
@@ -555,35 +570,36 @@ def build_batch_cancel_proto(
         )
     bc = sequencer_pb2.BatchCancelInput(
         symbol_id=symbol_id,
-        user_uuid=user_uuid,
+        account=account,
         order_ids=[int(oid) for oid in order_ids],
     )
     if correlation_id_bytes is not None:
         bc.correlation_id = correlation_id_body_bytes(correlation_id_bytes)
 
-    req = sequencer_pb2.EdgeSequencerRequest(batch_cancel=bc)
-    return req.SerializeToString()
+    return bc.SerializeToString()
 
 
 def build_batch_modify_proto(
     symbol_id: int,
-    user_uuid: bytes,
+    account: bytes,
     legs: list[dict[str, Any]],
     correlation_id_bytes: bytes | None = None,
+    scale: InstrumentDecimals | None = None,
 ) -> bytes:
-    """Build a BatchModifyInput wrapped in EdgeSequencerRequest, return serialized bytes.
+    """Build a bare BatchModifyInput for HPKE sealing; return serialized bytes.
 
     Each leg dict supports: ``order_id`` (int, the resting order to amend),
-    ``new_price`` (float|None) and ``new_quantity`` (float|None) — at least one
-    must be set — and an optional ``correlation_id`` (bytes). Up to 20 legs per
-    request, single symbol. Amends are post-only: a leg whose amended order would
-    cross is rejected rather than taking liquidity, keeping the batch ~constant
-    online MPC rounds.
+    ``new_price`` (decimal str|None) and ``new_quantity`` (decimal str|None) —
+    at least one must be set — and an optional ``correlation_id`` (bytes). Up
+    to 20 legs per request, single symbol. Amends are post-only: a leg whose
+    amended order would cross is rejected rather than taking liquidity, keeping
+    the batch ~constant online MPC rounds.
 
     Raises ``ValueError`` if ``legs`` is empty, has more than 20 entries, or
     contains a leg with neither ``new_price`` nor ``new_quantity`` set (a no-op
     amend that the node would reject).
     """
+    scale = scale or _DEFAULT_SCALE
     if not legs:
         raise ValueError("batch modify requires at least one leg")
     if len(legs) > _MAX_BATCH_LEGS:
@@ -593,7 +609,7 @@ def build_batch_modify_proto(
             raise ValueError(f"batch modify leg {i} must set new_price and/or new_quantity")
     bm = sequencer_pb2.BatchModifyInput(
         symbol_id=symbol_id,
-        user_uuid=user_uuid,
+        account=account,
     )
     if correlation_id_bytes is not None:
         bm.correlation_id = correlation_id_body_bytes(correlation_id_bytes)
@@ -602,20 +618,19 @@ def build_batch_modify_proto(
         pb_leg = bm.legs.add()
         pb_leg.order_id = int(leg["order_id"])
         if leg.get("new_price") is not None:
-            pb_leg.new_price = float(leg["new_price"])
+            pb_leg.new_price = format_decimal(leg["new_price"], scale.price_decimals)
         if leg.get("new_quantity") is not None:
-            pb_leg.new_quantity = float(leg["new_quantity"])
+            pb_leg.new_quantity = format_decimal(leg["new_quantity"], scale.quantity_decimals)
         # Each leg carries a unique 16-byte correlation_id (wire requires exactly
         # 16 bytes per leg). Callers may supply one; otherwise generate a fresh one.
         leg_cid = leg.get("correlation_id")
         pb_leg.correlation_id = leg_cid if leg_cid else uuid.uuid4().bytes
 
-    req = sequencer_pb2.EdgeSequencerRequest(batch_modify=bm)
-    return req.SerializeToString()
+    return bm.SerializeToString()
 
 
 def build_order_header_aad(
-    user_uuid: bytes,
+    account: bytes,
     symbol_id: int,
     request_type_str: str,
     nonce: int,
@@ -625,7 +640,7 @@ def build_order_header_aad(
 ) -> bytes:
     """Create an OrderHeader proto and serialize it (used as AES-GCM AAD)."""
     header = edge_pb2.OrderHeader(
-        user_uuid=user_uuid,
+        account=account,
         symbol_id=symbol_id,
         request_type=_REQUEST_TYPE_TO_PROTO[request_type_str],
         nonce=nonce,
@@ -637,7 +652,7 @@ def build_order_header_aad(
 
 
 def build_response_header_aad(
-    user_uuid: bytes,
+    account: bytes,
     message_type_str: str,
     body_length: int,
     nonce: int,
@@ -648,7 +663,7 @@ def build_response_header_aad(
 ) -> bytes:
     """Create a ResponseHeader proto and serialize it (used as AES-GCM AAD)."""
     header = edge_pb2.ResponseHeader(
-        user_uuid=user_uuid,
+        account=account,
         message_type=_RESPONSE_MESSAGE_TYPE_TO_PROTO[message_type_str],
         body_length=body_length,
         nonce=nonce,
@@ -907,11 +922,11 @@ def parse_leverage_settings_proto(msg: sequencer_pb2.LeverageSettings) -> Levera
     settings = tuple(
         LeverageSetting(symbol_id=row.symbol_id, leverage=row.leverage) for row in msg.settings
     )
-    user_uuid = _identity.bytes_to_uuid(msg.user_uuid) if msg.user_uuid else ""
+    account = _identity.bytes_to_account(msg.account) if msg.account else ""
     server_timestamp = int(msg.server_timestamp or 0)
     return LeverageSettings(
         settings=settings,
-        user_uuid=user_uuid,
+        account=account,
         server_timestamp=server_timestamp,
     )
 
@@ -937,7 +952,7 @@ def parse_order_update_proto(data: bytes) -> OrderUpdate:
 
     return OrderUpdate(
         order_id=str(msg.order_id),
-        user_uuid=_uuid_bytes_to_str(msg.user_uuid),
+        account=_account_bytes_to_str(msg.account),
         symbol_id=int(msg.symbol_id),
         side=_SIDE_FROM_PROTO.get(msg.side, Side.BUY),
         status=_ORDER_STATUS_FROM_PROTO.get(msg.order_status, OrderStatus.NEW),
@@ -999,6 +1014,18 @@ def parse_open_orders_snapshot_proto(msg: sequencer_pb2.OpenOrdersSnapshot) -> O
             price=str(r.price) if r.price else "",
             quantity=str(r.quantity) if r.quantity else "",
             remaining_qty=str(r.remaining_qty) if r.remaining_qty else "",
+            filled_qty=str(r.filled_qty) if r.filled_qty else "",
+            status=(
+                _ORDER_STATUS_FROM_PROTO[r.order_status].value
+                if r.order_status in _ORDER_STATUS_FROM_PROTO
+                else ""
+            ),
+            side=_SIDE_FROM_PROTO[r.side].value if r.side in _SIDE_FROM_PROTO else "",
+            order_type=(
+                _ORDER_TYPE_FROM_PROTO[r.order_type].value
+                if r.order_type in _ORDER_TYPE_FROM_PROTO
+                else ""
+            ),
         )
         for r in msg.rows
     )
@@ -1012,9 +1039,9 @@ def parse_open_orders_snapshot_proto(msg: sequencer_pb2.OpenOrdersSnapshot) -> O
 def parse_open_orders_snapshot(data: bytes) -> OpenOrdersSnapshot:
     """Decode ``open_orders_snapshot`` wire (legacy NodeResponse or direct message).
 
-    Used by the WS client: field 3 on ``NodeResponse`` collides with
-    ``SequencerToEdgeMessage.funding_rate_update``, so this path must not go
-    through :func:`parse_sequencer_to_edge_message`.
+    Used by the WS client: plaintext is the bare ``OpenOrdersSnapshot`` (or a
+    legacy ``NodeResponse`` wrapper). Dispatch by cleartext ``message_type``;
+    do not parse a ``SequencerToEdgeMessage`` envelope.
     """
     variant, payload = _resolve_rest_payload(data, "open_orders_snapshot")
     expected = "open_orders_snapshot"
@@ -1041,19 +1068,19 @@ def parse_open_orders_snapshot(data: bytes) -> OpenOrdersSnapshot:
 def parse_account_margin_update_proto(
     msg: sequencer_pb2.AccountMarginUpdate,
 ) -> AccountMarginUpdate:
-    account = None
-    if msg.HasField("account"):
-        a = msg.account
-        account = AccountMarginSummary(
+    summary = None
+    if msg.HasField("summary"):
+        a = msg.summary
+        summary = AccountMarginSummary(
             total_collateral=str(a.total_collateral),
             position_margin=str(a.position_margin),
             reserved_order_margin=str(a.reserved_order_margin),
             free_collateral=str(a.free_collateral),
         )
     return AccountMarginUpdate(
-        user_uuid=_uuid_bytes_to_str(msg.user_uuid),
+        account=_account_bytes_to_str(msg.account),
         server_timestamp=int(msg.server_timestamp),
-        account=account,
+        summary=summary,
     )
 
 
@@ -1072,7 +1099,7 @@ def parse_positions_snapshot_proto(msg: sequencer_pb2.PositionsSnapshot) -> Posi
 
     rows = tuple(parse_position_row_proto(r) for r in msg.rows)
     return PositionsSnapshot(
-        user_uuid=_uuid_bytes_to_str(msg.user_uuid),
+        account=_account_bytes_to_str(msg.account),
         rows=rows,
         server_timestamp=int(msg.server_timestamp),
         source=_parse_positions_snapshot_source(int(msg.source)),
@@ -1097,7 +1124,7 @@ def parse_system_health_proto(msg: health_pb2.HealthReport) -> SystemHealthUpdat
 
 def parse_balance_update_proto(msg: sequencer_pb2.BalanceUpdateMessage) -> BalanceUpdate:
     return BalanceUpdate(
-        user_uuid=_uuid_bytes_to_str(msg.user_uuid),
+        account=_account_bytes_to_str(msg.account),
         balance_raw=int(msg.balance_raw),
         timestamp=int(msg.timestamp),
         balance=msg.balance,
@@ -1125,6 +1152,7 @@ SequencerPush: TypeAlias = (
     | BalanceUpdate
     | FundingRateUpdate
     | LeverageSettings
+    | AccountMarginUpdate
     | UnknownSequencerPush
 )
 
@@ -1154,22 +1182,38 @@ def parse_funding_rate_snapshot_json(msg: dict) -> list[FundingRateUpdate]:
     return out
 
 
-def parse_sequencer_to_edge_message(data: bytes) -> SequencerPush:
-    """Decode a SequencerToEdgeMessage and dispatch to the appropriate parsed type."""
-    msg = sequencer_pb2.SequencerToEdgeMessage()
-    msg.ParseFromString(data)
+def parse_sequencer_to_edge_message(data: bytes, message_type: str | None = None) -> SequencerPush:
+    """Decode bare HPKE push plaintext using the cleartext ``message_type``.
 
-    which = msg.WhichOneof("inner")
-    if which == "order_update":
-        return parse_order_update_proto(msg.order_update.SerializeToString())
-    if which == "positions_snapshot":
-        return parse_positions_snapshot_proto(msg.positions_snapshot)
-    if which == "health_report":
-        return parse_system_health_proto(msg.health_report)
-    if which == "funding_rate_update":
-        return parse_funding_rate_update_proto(msg.funding_rate_update)
-    if which == "balance_update":
-        return parse_balance_update_proto(msg.balance_update)
-    if which == "leverage_settings":
-        return parse_leverage_settings_proto(msg.leverage_settings)
-    return UnknownSequencerPush(oneof_field=which)
+    Devnet seals the inner sequencer message selected by ``ResponseHeader.message_type``
+    (e.g. ``order_update`` → ``OrderUpdateMessage``). Do not parse a
+    ``SequencerToEdgeMessage`` envelope from the ciphertext.
+    """
+    mt = (message_type or "").replace("-", "_")
+    if mt == "order_update":
+        return parse_order_update_proto(data)
+    if mt == "positions_snapshot":
+        msg = sequencer_pb2.PositionsSnapshot()
+        msg.ParseFromString(data)
+        return parse_positions_snapshot_proto(msg)
+    if mt == "system_health":
+        msg = health_pb2.HealthReport()
+        msg.ParseFromString(data)
+        return parse_system_health_proto(msg)
+    if mt in ("balance_update", "balance_and_position"):
+        msg = sequencer_pb2.BalanceUpdateMessage()
+        msg.ParseFromString(data)
+        return parse_balance_update_proto(msg)
+    if mt == "funding_rate_update":
+        msg = sequencer_pb2.FundingRateUpdateMessage()
+        msg.ParseFromString(data)
+        return parse_funding_rate_update_proto(msg)
+    if mt == "leverage_settings":
+        msg = sequencer_pb2.LeverageSettings()
+        msg.ParseFromString(data)
+        return parse_leverage_settings_proto(msg)
+    if mt in ("account_margin_update", "account_update"):
+        msg = sequencer_pb2.AccountMarginUpdate()
+        msg.ParseFromString(data)
+        return parse_account_margin_update_proto(msg)
+    return UnknownSequencerPush(oneof_field=mt or None)

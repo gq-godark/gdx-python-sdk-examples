@@ -21,6 +21,10 @@ from .errors import TimeoutError as GdxTimeoutError
 
 logger = logging.getLogger("godark.transport")
 
+_PUBLIC_SNAPSHOT_TYPES = frozenset(
+    {"funding_rate_snapshot", "volume_snapshot", "open_interest_snapshot"}
+)
+
 
 def _is_docs_reply(msg: dict[str, Any]) -> bool:
     if msg.get("type") is not None:
@@ -52,11 +56,11 @@ def _normalize_inbound_message(msg: dict[str, Any]) -> dict[str, Any]:
                 "error": err_text or "authentication failed",
             }
         if isinstance(data, dict):
-            uid = data.get("user_uuid")
+            account = data.get("account")
             return {
                 "type": "auth_result",
                 "success": True,
-                "user_uuid": uid,
+                "account": account,
                 "conn_id": data.get("conn_id"),
                 "account_id": data.get("account_id"),
                 "session_id": data.get("session_id"),
@@ -99,8 +103,17 @@ def _normalize_inbound_message(msg: dict[str, Any]) -> dict[str, Any]:
                 "message": err_text or "channel error",
                 "channel": ch,
             }
-        if isinstance(data, dict) and "channel" in data:
-            return {"event": op, "channel": data["channel"]}
+        if isinstance(data, dict):
+            # Initial public snapshots ride the subscribe ack as data.type.
+            # Keep the payload so dispatch can deliver it; the channel ack is
+            # a separate frame and is what completes the subscribe waiter.
+            typ = data.get("type")
+            if typ in _PUBLIC_SNAPSHOT_TYPES:
+                lifted = dict(data)
+                lifted["type"] = typ
+                return lifted
+            if "channel" in data:
+                return {"event": op, "channel": data["channel"]}
         return {"event": op}
 
     if op == "logout":
@@ -198,6 +211,7 @@ class TransportConfig:
     max_size: int | None = 8 * 1024 * 1024
     heartbeat_interval: float | None = None
     stale_timeout: float | None = None
+    missed_heartbeat_limit: int | None = None
     command_timeout: float | None = None
     use_docs_wire: bool = True
 
@@ -210,7 +224,8 @@ class EdgeTransport:
     """
 
     HEARTBEAT_INTERVAL = 30.0
-    STALE_TIMEOUT = 60.0
+    STALE_TIMEOUT = 120.0
+    MISSED_HEARTBEAT_LIMIT = 2
     COMMAND_TIMEOUT = 30.0
 
     def __init__(self, url: str, config: TransportConfig | None = None):
@@ -226,6 +241,11 @@ class EdgeTransport:
             if self._config.stale_timeout is not None
             else self.STALE_TIMEOUT
         )
+        self._missed_heartbeat_limit: int = (
+            self._config.missed_heartbeat_limit
+            if self._config.missed_heartbeat_limit is not None
+            else self.MISSED_HEARTBEAT_LIMIT
+        )
         self._command_timeout: float = (
             self._config.command_timeout
             if self._config.command_timeout is not None
@@ -234,8 +254,13 @@ class EdgeTransport:
         self._ws: ClientConnection | None = None
         self._connected = False
         self._last_inbound: float = 0.0
+        self._inbound_since_ping = True
+        self._missed_heartbeat_count = 0
         self._heartbeat_task: asyncio.Task | None = None
         self._recv_task: asyncio.Task | None = None
+        # Set when write-half death (or equivalent) has already woken reconnect
+        # machinery — prevents double on_disconnect from send + heartbeat (#56).
+        self._disconnect_signaled = False
 
         # Command waiters.
         #
@@ -270,6 +295,7 @@ class EdgeTransport:
         self.on_session_established: Callable | None = None
         self.on_rekey_required: Callable | None = None
         self.on_disconnect: Callable | None = None
+        self.on_stale: Callable[[str], None] | None = None
         # Public market snapshots (funding_rate, volume, open_interest) on /ws/v1.
         self.on_public_message: Callable | None = None
 
@@ -288,11 +314,54 @@ class EdgeTransport:
     def _new_wire_id(self) -> str:
         return str(uuid.uuid4())
 
+    def _note_inbound(self) -> None:
+        """Record inbound traffic and reset missed-heartbeat tracking."""
+        self._last_inbound = time.monotonic()
+        self._inbound_since_ping = True
+        self._missed_heartbeat_count = 0
+
+    def _notify_stale(self, reason: str) -> None:
+        if self.on_stale:
+            try:
+                self.on_stale(reason)
+            except Exception:
+                logger.debug("on_stale callback raised", exc_info=True)
+
+    async def _signal_disconnected(self, reason: str = "write failed") -> None:
+        """Wake reconnect when the write path dies while recv may still be alive.
+
+        Mirrors gdx-rust-sdk#56: do not silently break on write/send failure and
+        wait for inbound staleness. Cancel recv (best-effort) and always invoke
+        ``on_disconnect`` here — under cancellation, recv's ``finally`` is not
+        a reliable place to start reconnect.
+        """
+        if self._disconnect_signaled:
+            return
+        self._disconnect_signaled = True
+        self._connected = False
+        if self._ws is not None:
+            with contextlib.suppress(Exception):
+                await self._ws.close(4000, reason)
+        recv = self._recv_task
+        if recv is not None and not recv.done():
+            recv.cancel()
+        self._reject_pending("connection lost")
+        if self.on_disconnect:
+            try:
+                result = self.on_disconnect()
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:
+                pass
+
     async def connect(self) -> None:
         """Open WebSocket connection."""
         self._ws = await self._open_connection()
         self._connected = True
+        self._disconnect_signaled = False
         self._last_inbound = time.monotonic()
+        self._inbound_since_ping = True
+        self._missed_heartbeat_count = 0
         self._recv_task = asyncio.create_task(self._recv_loop())
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         logger.info("Connected to %s", self._url)
@@ -336,13 +405,25 @@ class EdgeTransport:
         """Send a JSON message."""
         if not self._ws:
             raise RuntimeError("Not connected")
-        await self._ws.send(json.dumps(obj))
+        try:
+            await self._ws.send(json.dumps(obj))
+        except Exception:
+            # Write half gone while read may still be alive — must wake reconnect
+            # (gdx-rust-sdk#56). Do not rely on inbound staleness.
+            logger.warning("WebSocket write failed")
+            await self._signal_disconnected()
+            raise
 
     async def send_binary(self, data: bytes) -> None:
         """Send a binary WebSocket frame."""
         if not self._ws:
             raise RuntimeError("Not connected")
-        await self._ws.send(data)
+        try:
+            await self._ws.send(data)
+        except Exception:
+            logger.warning("WebSocket write failed")
+            await self._signal_disconnected()
+            raise
 
     @staticmethod
     def _command_correlation_id(payload: dict) -> str:
@@ -680,7 +761,7 @@ class EdgeTransport:
         """Background task: read messages from WebSocket and dispatch."""
         try:
             async for raw in self._ws:
-                self._last_inbound = time.monotonic()
+                self._note_inbound()
                 if isinstance(raw, bytes):
                     self._dispatch_binary(raw)
                     continue
@@ -697,14 +778,16 @@ class EdgeTransport:
             logger.error("recv_loop error: %s", e)
         finally:
             self._connected = False
-            self._reject_pending("connection lost")
-            if self.on_disconnect:
-                try:
-                    result = self.on_disconnect()
-                    if asyncio.iscoroutine(result):
-                        await result
-                except Exception:
-                    pass
+            # Write-death path already rejected waiters + called on_disconnect (#56).
+            if not self._disconnect_signaled:
+                self._reject_pending("connection lost")
+                if self.on_disconnect:
+                    try:
+                        result = self.on_disconnect()
+                        if asyncio.iscoroutine(result):
+                            await result
+                    except Exception:
+                        pass
 
     def _dispatch(self, msg: dict) -> None:
         """Route inbound message to the appropriate handler."""
@@ -746,9 +829,14 @@ class EdgeTransport:
                     self._sub_waiter.set_result(None)
             return
 
-        if event == "error":
+        # Unknown channels arrive as a type-tagged error push (parse failure),
+        # not as an event-tagged subscribe ack. Fail the waiter immediately.
+        if event == "error" or (
+            msg_type == "error" and self._sub_waiter is not None and not self._sub_waiter.done()
+        ):
             if self._sub_waiter and not self._sub_waiter.done():
-                self._sub_waiter.set_exception(RuntimeError(msg.get("message", "channel error")))
+                text = msg.get("message") or msg.get("error") or "channel error"
+                self._sub_waiter.set_exception(RuntimeError(str(text)))
             return
 
         # ack / error responses for commands (routed by correlation id when
@@ -771,10 +859,27 @@ class EdgeTransport:
                     break
                 elapsed = time.monotonic() - self._last_inbound
                 if elapsed > self._stale_timeout:
+                    reason = f"stale heartbeat: no inbound message for {self._stale_timeout:.0f}s"
                     logger.warning("Stale connection (%.1fs no inbound), closing", elapsed)
-                    if self._ws:
-                        await self._ws.close(4000, "heartbeat timeout")
+                    self._notify_stale(reason)
+                    await self._signal_disconnected(reason)
                     break
+
+                if not self._inbound_since_ping:
+                    self._missed_heartbeat_count += 1
+                else:
+                    self._missed_heartbeat_count = 0
+
+                if self._missed_heartbeat_count >= self._missed_heartbeat_limit:
+                    reason = (
+                        f"stale heartbeat: missed {self._missed_heartbeat_count} "
+                        f"heartbeat responses (limit {self._missed_heartbeat_limit})"
+                    )
+                    logger.warning("%s, closing", reason)
+                    self._notify_stale(reason)
+                    await self._signal_disconnected(reason)
+                    break
+
                 try:
                     if self._use_docs_wire:
                         await self.send_json(
@@ -786,7 +891,14 @@ class EdgeTransport:
                         )
                     else:
                         await self.send_json({"type": "ping"})
-                except Exception:
+                    self._inbound_since_ping = False
+                except Exception as exc:
+                    # send_json already signaled disconnect; still surface stale
+                    # reason for the client error channel (#56).
+                    reason = f"stale heartbeat: ping send failed: {exc}"
+                    logger.warning("%s", reason)
+                    self._notify_stale(reason)
+                    await self._signal_disconnected(reason)
                     break
         except asyncio.CancelledError:
             return

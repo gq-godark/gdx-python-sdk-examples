@@ -7,6 +7,8 @@ exercises LIMIT place / modify / cancel with a printed session summary.
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import asyncio
 import os
 import sys
@@ -35,11 +37,16 @@ from godark import (
 SYMBOL = "BTC-USDC-PERP"
 
 
-def live_mark_price() -> float:
+def live_mark_price() -> str:
     raw = get_first("GODARK_E2E_PRICE", "GDX_E2E_PRICE", "GDX_LIVE_PRICE")
     if raw:
-        return float(raw)
-    return 79_000.0
+        return raw.strip()
+    return "79000.0"
+
+
+def decimal_mul(value: str, factor: str, places: int = 1) -> str:
+    q = Decimal("1").scaleb(-places)
+    return format((Decimal(value) * Decimal(factor)).quantize(q), "f")
 
 
 async def main() -> int:
@@ -59,7 +66,8 @@ async def main() -> int:
         open_timeout=10.0,
         command_timeout=10.0,
         heartbeat_interval=30.0,
-        stale_timeout=60.0,
+        stale_timeout=120.0,
+        missed_heartbeat_limit=2,
     )
 
     counts: dict[str, int] = defaultdict(int)
@@ -77,8 +85,8 @@ async def main() -> int:
         client_kwargs["base_url"] = edge
     if legacy_key:
         client_kwargs["api_key"] = legacy_key
-        if uid := get_first("GODARK_USER_UUID", "GDX_USER_UUID"):
-            client_kwargs["user_uuid"] = uid
+        if account := get_first("GODARK_ACCOUNT", "GDX_ACCOUNT"):
+            client_kwargs["account"] = account
     else:
         api_key_id = get_first("GODARK_API_KEY_ID", "GDX_API_KEY_ID")
         api_secret = get_first("GODARK_API_SECRET", "GDX_API_SECRET")
@@ -111,8 +119,8 @@ async def main() -> int:
 
     # BTC-USDC-PERP is symbol_id 1; capture its live mark from snapshots so the
     # mass-quote ladder/cross prices below can anchor to the real touch instead
-    # of a fixed constant.
-    last_mark: dict[str, float] = {}
+    # of a fixed constant. Keep the venue decimal string (no float→str).
+    last_mark: dict[str, str] = {}
 
     def on_snap(s: PositionsSnapshot) -> None:
         bump("positions_snapshot")
@@ -122,10 +130,7 @@ async def main() -> int:
         )
         for row in s.rows:
             if row.symbol_id == 1 and row.mark_price:
-                try:
-                    last_mark["BTC"] = float(row.mark_price)
-                except (TypeError, ValueError):
-                    pass
+                last_mark["BTC"] = row.mark_price
             mark = row.mark_price or "—"
             print(
                 f"  ↳ symbol={row.symbol_id}  side={row.side}  "
@@ -191,8 +196,8 @@ async def main() -> int:
         print(f"Failed to connect: {e}", file=sys.stderr)
         return 1
 
-    uid = client.user_uuid or ""
-    print(f"Authenticated as user_uuid={uid}  (session encrypted)")
+    account = client.account or ""
+    print(f"Authenticated as account={account}  (session encrypted)")
 
     try:
         await client.subscribe(["orders", "positions", "funding_rate"])
@@ -234,48 +239,66 @@ async def main() -> int:
             print(f"  ({n} order update(s) {label})")
 
     mark = live_mark_price()
-    buy_px = round(mark * 0.997, 1)
+    buy_px = decimal_mul(mark, "0.997")
     print(f"Placing limit BUY @ {buy_px} (mark={mark})...")
     try:
         buy_ack = await client.place_order(
             SYMBOL,
             Side.BUY,
             OrderType.LIMIT,
-            0.1,
+            "0.1",
             price=buy_px,
             time_in_force=TimeInForce.GTC,
         )
         print(f"BUY placed: order_id={buy_ack.order_id}  sequence={buy_ack.sequence}")
     except Exception as e:
-        print_order_error("BUY rejected", e)
-        await client.disconnect()
-        return 1
+        print_order_error("BUY rejected (continuing to market Place)", e)
+        buy_ack = None
 
     await asyncio.sleep(1)
     drain_orders("after BUY")
 
-    modify_px = round(mark * 0.996, 1)
-    print(f"Modifying order price to {modify_px}...")
-    assert buy_ack is not None
+    if buy_ack is not None:
+        modify_px = decimal_mul(mark, "0.996")
+        print(f"Modifying order price to {modify_px}...")
+        try:
+            mod_ack = await client.modify_order(
+                str(buy_ack.order_id), SYMBOL, new_price=modify_px
+            )
+            print(f"Modified: order_id={mod_ack.order_id}")
+        except Exception as e:
+            print_order_error("Modify rejected", e)
+
+        await asyncio.sleep(1)
+        drain_orders("after MODIFY")
+
+    # Market IOC with explicit walk cap: 50 bps = 0.5% of mark (UI default).
+    # Omit slippage_bps → venue max (localnet 5%).
+    print("Placing market IOC BUY qty=0.01 with slippage_bps=50 (0.5% walk)...")
     try:
-        mod_ack = await client.modify_order(
-            str(buy_ack.order_id), SYMBOL, new_price=modify_px
+        mkt_ack = await client.place_order(
+            SYMBOL,
+            Side.BUY,
+            OrderType.MARKET,
+            "0.01",
+            time_in_force=TimeInForce.IOC,
+            options=PlaceOrderOptions(slippage_bps=50),
         )
-        print(f"Modified: order_id={mod_ack.order_id}")
+        print(f"MARKET BUY placed: order_id={mkt_ack.order_id}")
     except Exception as e:
-        print_order_error("Modify rejected", e)
+        print_order_error("Market BUY rejected (continuing)", e)
 
     await asyncio.sleep(1)
-    drain_orders("after MODIFY")
+    drain_orders("after MARKET BUY")
 
-    sell_px = round(mark * 1.03, 1)
+    sell_px = decimal_mul(mark, "1.03")
     print(f"Placing limit SELL @ {sell_px}...")
     try:
         sell_ack = await client.place_order(
             SYMBOL,
             Side.SELL,
             OrderType.LIMIT,
-            0.05,
+            "0.05",
             price=sell_px,
             time_in_force=TimeInForce.GTC,
             options=PlaceOrderOptions(post_only=True),
@@ -302,12 +325,12 @@ async def main() -> int:
     # Anchor the ladder/cross to the live BTC mark captured from the snapshot so
     # the crossing demo below is deterministic regardless of current price. Fall
     # back to GDX_BASE (default 64000) only if no mark was seen yet.
-    base = last_mark.get("BTC") or float(os.environ.get("GDX_BASE", "64000"))
-    print(f"Mass-quoting a 3-level BUY ladder (post-only), base={base:.2f}...")
+    base = last_mark.get("BTC") or os.environ.get("GDX_BASE", "64000")
+    print(f"Mass-quoting a 3-level BUY ladder (post-only), base={base}...")
     ladder = [
-        {"side": Side.BUY, "price": round(base * (1 - 0.003), 1), "quantity": 0.02},
-        {"side": Side.BUY, "price": round(base * (1 - 0.006), 1), "quantity": 0.02},
-        {"side": Side.BUY, "price": round(base * (1 - 0.009), 1), "quantity": 0.02},
+        {"side": Side.BUY, "price": decimal_mul(base, "0.997"), "quantity": "0.02"},
+        {"side": Side.BUY, "price": decimal_mul(base, "0.994"), "quantity": "0.02"},
+        {"side": Side.BUY, "price": decimal_mul(base, "0.991"), "quantity": "0.02"},
     ]
     resting_ids: list[int] = []
     try:
@@ -341,12 +364,12 @@ async def main() -> int:
     # ~5% above the live mark: aggressive enough to cross the resting ask, yet
     # within the exchange's 10%-of-oracle limit. Anchored to the live mark, this
     # makes the post_only=true (reject) vs false (fill) contrast deterministic.
-    cross_px = round(base * 1.05, 1)
+    cross_px = decimal_mul(base, "1.05")
     # post_only=True: a crossing leg is rejected (would-cross, error_code 2018).
     print("Mass-quoting a crossing BUY with post_only=True (expect rejected/2018)...")
     try:
         mq = await client.mass_quote(
-            SYMBOL, [{"side": Side.BUY, "price": cross_px, "quantity": 0.001}],
+            SYMBOL, [{"side": Side.BUY, "price": cross_px, "quantity": "0.001"}],
             post_only=True,
         )
         for r in mq.results:
@@ -361,7 +384,7 @@ async def main() -> int:
     print("Mass-quoting a crossing BUY with post_only=False (expect filled, fill_count>0)...")
     try:
         mq = await client.mass_quote(
-            SYMBOL, [{"side": Side.BUY, "price": cross_px, "quantity": 0.003}],
+            SYMBOL, [{"side": Side.BUY, "price": cross_px, "quantity": "0.003"}],
             post_only=False,
         )
         for r in mq.results:
@@ -391,7 +414,8 @@ async def main() -> int:
 
     print("Cancelling original BUY (cleanup)...")
     try:
-        await client.cancel_order(str(buy_ack.order_id), SYMBOL)
+        if buy_ack is not None:
+            await client.cancel_order(str(buy_ack.order_id), SYMBOL)
         print("Original BUY cancelled")
     except Exception:
         print("Original BUY already filled or cancelled")
