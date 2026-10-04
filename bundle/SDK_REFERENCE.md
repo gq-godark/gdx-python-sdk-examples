@@ -339,10 +339,10 @@ Recipients run `bash scripts/setup_venv.sh` after copying `.env.example` →
 `.env`. The script:
 
 1. Creates a `.venv` with the first `python3 >= 3.10` it finds (override with `PYTHON=/path/to/python3.12`).
-2. If the bundle includes `wheels/godark-*.whl`, installs that wheel; otherwise installs the vendored `sdk/` directory in editable-equivalent mode (`pip install ./sdk`).
+2. If the bundle includes `wheels/godark-*.whl`, installs that wheel; otherwise installs the included `sdk/` directory (`pip install ./sdk`).
 3. Resolves third-party dependencies (`websockets`, `cryptography`, `protobuf`, `httpx`) from PyPI via the wheel/sdist metadata.
 
-Force install from the vendored sources (debugging) with
+Force install from the included sources (debugging) with
 `PREFER_SDK_SOURCE=1 bash scripts/setup_venv.sh`.
 
 To use `godark` from your own project, install the wheel directly:
@@ -372,11 +372,6 @@ sdk/
     └── _generated/…          # committed *_pb2.py protobuf stubs
 ```
 
-Maintainers refresh `sdk/` from a sibling upstream checkout:
-
-```bash
-./scripts/refresh_sdk.sh /path/to/gdx-python-sdk
-```
 
 ## GodarkRestClient API
 
