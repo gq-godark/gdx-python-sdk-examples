@@ -272,21 +272,8 @@ async def main() -> int:
         await asyncio.sleep(1)
         drain_orders("after MODIFY")
 
-    # Market IOC with explicit walk cap: 50 bps = 0.5% of mark (UI default).
-    # Omit slippage_bps → venue max (localnet 5%).
-    print("Placing market IOC BUY qty=0.01 with slippage_bps=50 (0.5% walk)...")
-    try:
-        mkt_ack = await client.place_order(
-            SYMBOL,
-            Side.BUY,
-            OrderType.MARKET,
-            "0.01",
-            time_in_force=TimeInForce.IOC,
-            options=PlaceOrderOptions(slippage_bps=50),
-        )
-        print(f"MARKET BUY placed: order_id={mkt_ack.order_id}")
-    except Exception as e:
-        print_order_error("Market BUY rejected (continuing)", e)
+    # A market IOC can fill and leave a position. This sample does not send one.
+    print("Skipping market IOC so the sample does not open a position.")
 
     await asyncio.sleep(1)
     drain_orders("after MARKET BUY")
@@ -351,12 +338,13 @@ async def main() -> int:
     drain_orders("after MASS QUOTE")
 
     if resting_ids:
-        print("cancel_all_orders (cleanup ladder)...")
-        try:
-            ca = await client.cancel_all_orders(SYMBOL)
-            print(f"  cancel_all: count={ca.count} ids={list(ca.order_ids)}", flush=True)
-        except Exception as e:
-            print_order_error("cancel_all rejected", e)
+        print(f"Cancelling {len(resting_ids)} ladder order(s) by id...")
+        for oid in resting_ids:
+            try:
+                ca = await client.cancel_order(str(oid), SYMBOL)
+                print(f"  cancel order_id={ca.order_id}", flush=True)
+            except Exception as e:
+                print_order_error(f"cancel {oid} rejected", e)
         await asyncio.sleep(0.5)
         drain_orders("after CANCEL ALL")
 
@@ -379,12 +367,12 @@ async def main() -> int:
         print_order_error("post_only=True mass quote rejected", e)
     await asyncio.sleep(0.5)
 
-    # post_only=False (relaxed): the crossing leg takes liquidity up to its limit
-    # and rests the remainder; taker fills are reported per leg as fill_count.
-    print("Mass-quoting a crossing BUY with post_only=False (expect filled, fill_count>0)...")
+    # post_only=False still prices below the mark so the leg rests instead of filling.
+    rest_px = decimal_mul(base, "0.95")
+    print(f"Mass-quoting a resting BUY @ {rest_px} with post_only=False (cancelled by id)...")
     try:
         mq = await client.mass_quote(
-            SYMBOL, [{"side": Side.BUY, "price": cross_px, "quantity": "0.003"}],
+            SYMBOL, [{"side": Side.BUY, "price": rest_px, "quantity": "0.003"}],
             post_only=False,
         )
         for r in mq.results:

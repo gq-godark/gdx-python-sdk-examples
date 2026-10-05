@@ -79,8 +79,8 @@ async def main() -> int:
                 print(f"Place OK — order_id={ack.order_id} (limit SELL @ {sell_px}, mark={mark})")
                 # Allow the resting order to settle before cancel (avoids CANCEL_TOO_SOON).
                 await asyncio.sleep(0.5)
-                cancel_ack = await client.cancel_all_orders(SYMBOL)
-                print(f"cancel_all OK — count={cancel_ack.count} ids={list(cancel_ack.order_ids)}")
+                cancel_ack = await client.cancel_order(str(ack.order_id), SYMBOL)
+                print(f"cancel OK — order_id={cancel_ack.order_id}")
             except Exception as e:
                 print_order_error("Order rejected", e)
                 return 1

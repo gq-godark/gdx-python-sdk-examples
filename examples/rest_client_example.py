@@ -47,29 +47,18 @@ async def main() -> int:
         print("connecting (REST auth/token)...")
         await client.connect()
 
-        try:
-            me = await client.get_me()
-            print(f"me: id={me.id} wallet={me.wallet_address} tier={me.tier}")
-        except Exception as exc:
-            print(f"get_me skipped: {exc}")
-
-        try:
-            lev = await client.get_leverage()
-            print(f"leverage settings: {len(lev.settings)} entries")
-            print("  (WS push: on_leverage_settings in full_trader_example.py)")
-            for row in lev.settings[:5]:
-                print(f"  symbol_id={row.symbol_id} leverage={row.leverage}")
-        except Exception as exc:
-            print(f"get_leverage skipped: {exc}")
-
-        try:
-            bal = await client.get_my_balance()
-            print(
-                f"balance: shielded_raw={bal.shielded_balance_raw} "
-                f"wallet_ui={bal.wallet_usdt_ui}"
-            )
-        except Exception as exc:
-            print(f"get_my_balance skipped: {exc}")
+        positions = await client.get_positions()
+        orders = await client.get_open_orders()
+        account = await client.get_account()
+        funding = await client.get_funding_rates()
+        interest = await client.get_open_interest()
+        volume = await client.get_volume()
+        print(f"positions: {type(positions).__name__}")
+        print(f"open_orders: {type(orders).__name__}")
+        print(f"account: {type(account).__name__}")
+        print(f"funding_rates: {len(funding)} rows")
+        print(f"open_interest: {len(interest)} rows")
+        print(f"volume: {type(volume).__name__}")
 
         print("REST reads succeeded.")
         print("For REST trading (place/modify/cancel), see full_trader_rest.py.")
