@@ -190,6 +190,7 @@ async for u in client.order_updates():
 | `system_health_updates()` | `SystemHealthUpdate` |
 | `balance_updates()` | `BalanceUpdate` |
 | `margin_alerts()` | `MarginAlert` |
+| `account_margin_updates()` | `AccountMarginUpdate` |
 | `funding_rate_updates()` | `FundingRateUpdate` |
 | `settlement_updates()` | `SettlementUpdate` |
 
