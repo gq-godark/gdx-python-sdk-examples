@@ -42,6 +42,7 @@ from .order_error_code import (
 )
 from .rest_client import GodarkRestClient
 from .types import (
+    AccountMarginUpdate,
     Balance,
     BalanceUpdate,
     BatchCancelAck,
@@ -56,6 +57,7 @@ from .types import (
     MassQuoteAck,
     MassQuoteLegResult,
     MeProfile,
+    OpenOrdersSnapshot,
     OrderAck,
     OrderUpdate,
     PlaceOrderOptions,
@@ -91,10 +93,12 @@ __all__ = [
     "TpslAck",
     "PositionsSnapshotSource",
     "SettlementBatchStatus",
+    "AccountMarginUpdate",
     "Balance",
     "LeverageSetting",
     "LeverageSettings",
     "MeProfile",
+    "OpenOrdersSnapshot",
     "OrderAck",
     "OrderUpdate",
     "PlaceOrderOptions",
