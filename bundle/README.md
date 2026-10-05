@@ -3,7 +3,7 @@
 This package provides the GoDark Python SDK and minimal examples for encrypted
 darkpool trading.
 
-Supported order types in this distribution: `MARKET`, `LIMIT`.
+The trading samples place post-only `LIMIT` orders priced from the live mark.
 
 ## Package contents
 

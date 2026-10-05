@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """GoDark Python SDK — trader reference example (parity with other MM distributions).
 
-Registers callbacks for orders, positions, and all sequencer push streams, then
-exercises LIMIT place / modify / cancel with a printed session summary.
+Registers callbacks for orders, positions, and sequencer push streams, then
+places post-only limits priced from the live mark and cancels only those orders.
 """
 
 from __future__ import annotations
 
-from decimal import Decimal
-
 import asyncio
-import os
 import sys
 from collections import defaultdict, deque
 
@@ -20,6 +17,7 @@ from godark import (
     Environment,
     FundingRateUpdate,
     GodarkClient,
+    GodarkRestClient,
     LeverageSettings,
     MarginAlert,
     OrderType,
@@ -33,20 +31,17 @@ from godark import (
     TimeInForce,
     TransportConfig,
 )
-
-SYMBOL = "BTC-USDC-PERP"
-
-
-def live_mark_price() -> str:
-    raw = get_first("GODARK_E2E_PRICE", "GDX_E2E_PRICE", "GDX_LIVE_PRICE")
-    if raw:
-        return raw.strip()
-    return "79000.0"
-
-
-def decimal_mul(value: str, factor: str, places: int = 1) -> str:
-    q = Decimal("1").scaleb(-places)
-    return format((Decimal(value) * Decimal(factor)).quantize(q), "f")
+from trade_safety import (
+    QTY,
+    SYMBOL,
+    assert_own_orders_flat,
+    cancel_own,
+    flatten_positions,
+    position_fingerprint,
+    post_only_price,
+    read_book,
+    resolve_live_mark,
+)
 
 
 async def main() -> int:
@@ -55,7 +50,7 @@ async def main() -> int:
     print(sep)
     print("  GoDark Python SDK — Trader Reference Example")
     print(sep)
-    print("Order-type support in this distribution: MARKET, LIMIT")
+    print("Sample orders are post-only LIMIT, priced from the live mark")
 
     legacy_key = get_first("GODARK_API_KEY", "GDX_API_KEY")
     edge = get_first("GODARK_EDGE_URL", "GDX_EDGE_URL")
@@ -105,6 +100,14 @@ async def main() -> int:
         )
 
     client = GodarkClient(**client_kwargs)
+    rest_kwargs = {
+        k: client_kwargs[k]
+        for k in ("api_key", "api_key_id", "api_secret", "passphrase", "account", "user_uuid")
+        if k in client_kwargs
+    }
+    if edge:
+        rest_kwargs["rest_base_url"] = edge
+    rest = GodarkRestClient(**rest_kwargs)
 
     def on_order(u: OrderUpdate) -> None:
         bump("order_update")
@@ -117,9 +120,9 @@ async def main() -> int:
             flush=True,
         )
 
-    # BTC-USDC-PERP is symbol_id 1; capture its live mark from snapshots so the
-    # mass-quote ladder/cross prices below can anchor to the real touch instead
-    # of a fixed constant. Keep the venue decimal string (no float→str).
+    # Capture a BTC mark from an authenticated positions snapshot when a row
+    # actually includes one. A flat account has no mark here; pricing then uses
+    # public open interest. Keep the venue decimal string (no float→str).
     last_mark: dict[str, str] = {}
 
     def on_snap(s: PositionsSnapshot) -> None:
@@ -194,6 +197,7 @@ async def main() -> int:
         await client.connect()
     except Exception as e:
         print(f"Failed to connect: {e}", file=sys.stderr)
+        await rest.disconnect()
         return 1
 
     account = client.account or ""
@@ -204,6 +208,7 @@ async def main() -> int:
     except Exception as e:
         print(f"Subscribe failed: {e}", file=sys.stderr)
         await client.disconnect()
+        await rest.disconnect()
         return 1
 
     print("Subscribed to order + position updates")
@@ -238,177 +243,122 @@ async def main() -> int:
         if n:
             print(f"  ({n} order update(s) {label})")
 
-    mark = live_mark_price()
-    buy_px = decimal_mul(mark, "0.997")
-    print(f"Placing limit BUY @ {buy_px} (mark={mark})...")
+    class _MarkRow:
+        def __init__(self, symbol_id: int, mark_price: str) -> None:
+            self.symbol_id = symbol_id
+            self.mark_price = mark_price
+
+    own_ids: list[str] = []
+    baseline: dict = {}
+    mark = ""
+    failed = False
     try:
-        buy_ack = await client.place_order(
-            SYMBOL,
-            Side.BUY,
-            OrderType.LIMIT,
-            "0.1",
-            price=buy_px,
-            time_in_force=TimeInForce.GTC,
-        )
-        print(f"BUY placed: order_id={buy_ack.order_id}  sequence={buy_ack.sequence}")
+        _, positions = await read_book(rest)
+        baseline = position_fingerprint(positions)
+        snap_rows = [_MarkRow(1, last_mark["BTC"])] if last_mark.get("BTC") else positions.rows
+        mark = await resolve_live_mark(rest, position_rows=snap_rows)
     except Exception as e:
-        print_order_error("BUY rejected (continuing to market Place)", e)
-        buy_ack = None
+        print(f"No live mark; placing nothing: {e}", file=sys.stderr)
+        failed = True
 
-    await asyncio.sleep(1)
-    drain_orders("after BUY")
-
-    if buy_ack is not None:
-        modify_px = decimal_mul(mark, "0.996")
-        print(f"Modifying order price to {modify_px}...")
-        try:
-            mod_ack = await client.modify_order(
-                str(buy_ack.order_id), SYMBOL, new_price=modify_px
-            )
-            print(f"Modified: order_id={mod_ack.order_id}")
-        except Exception as e:
-            print_order_error("Modify rejected", e)
-
-        await asyncio.sleep(1)
-        drain_orders("after MODIFY")
-
-    # A market IOC can fill and leave a position. This sample does not send one.
-    print("Skipping market IOC so the sample does not open a position.")
-
-    await asyncio.sleep(1)
-    drain_orders("after MARKET BUY")
-
-    sell_px = decimal_mul(mark, "1.03")
-    print(f"Placing limit SELL @ {sell_px}...")
-    try:
-        sell_ack = await client.place_order(
+    async def place_post_only(side: Side, price: str, label: str) -> str:
+        ack = await client.place_order(
             SYMBOL,
-            Side.SELL,
+            side,
             OrderType.LIMIT,
-            "0.05",
-            price=sell_px,
+            QTY,
+            price=price,
             time_in_force=TimeInForce.GTC,
             options=PlaceOrderOptions(post_only=True),
         )
-        print(f"SELL placed: order_id={sell_ack.order_id}")
-        await asyncio.sleep(0.5)
+        if not ack.success or not ack.order_id:
+            raise RuntimeError(f"{label} place failed: {ack.error or ack.error_code}")
+        oid = str(ack.order_id)
+        own_ids.append(oid)
+        print(f"{label} placed: order_id={oid} @ {price}")
+        return oid
+
+    if not failed:
+        buy_id = ""
         try:
-            cack = await client.cancel_order(str(sell_ack.order_id), SYMBOL)
-            print(f"SELL cancelled: order_id={cack.order_id}")
+            buy_px = post_only_price(mark, Side.BUY, steps=1)
+            print(f"Placing post-only BUY @ {buy_px} (mark={mark})...")
+            buy_id = await place_post_only(Side.BUY, buy_px, "BUY")
+            await asyncio.sleep(1)
+            drain_orders("after BUY")
+            modify_px = post_only_price(mark, Side.BUY, steps=2)
+            print(f"Modifying order price to {modify_px}...")
+            mod_ack = await client.modify_order(buy_id, SYMBOL, new_price=modify_px)
+            if not mod_ack.success:
+                raise RuntimeError(f"modify failed: {mod_ack.error or mod_ack.error_code}")
+            print(f"Modified: order_id={mod_ack.order_id}")
+            drain_orders("after MODIFY")
+            await cancel_own(client, buy_id)
+            print(f"BUY cancelled: order_id={buy_id}")
+            own_ids.remove(buy_id)
+            await assert_own_orders_flat(rest, {buy_id}, baseline)
+            drain_orders("after BUY cancel")
+
+            sell_px = post_only_price(mark, Side.SELL, steps=1)
+            print(f"Placing post-only SELL @ {sell_px}...")
+            sell_id = await place_post_only(Side.SELL, sell_px, "SELL")
+            drain_orders("after SELL")
+            await cancel_own(client, sell_id)
+            print(f"SELL cancelled: order_id={sell_id}")
+            own_ids.remove(sell_id)
+            await assert_own_orders_flat(rest, {sell_id}, baseline)
+            drain_orders("after SELL/CANCEL")
+
+            print(f"Mass-quoting a 3-level post-only BUY ladder, mark={mark}...")
+            ladder = [
+                {"side": Side.BUY, "price": post_only_price(mark, Side.BUY, steps=1), "quantity": QTY},
+                {"side": Side.BUY, "price": post_only_price(mark, Side.BUY, steps=2), "quantity": QTY},
+                {"side": Side.BUY, "price": post_only_price(mark, Side.BUY, steps=3), "quantity": QTY},
+            ]
+            mq = await client.mass_quote(SYMBOL, ladder, post_only=True)
+            print(f"Mass quote: success={mq.success} sequence={mq.sequence} legs={len(mq.results)}")
+            for r in mq.results:
+                print(
+                    f"  leg {r.leg_index}: status={r.status} new_order_id={r.new_order_id} "
+                    f"fills={r.fill_count} err={r.error_code}",
+                    flush=True,
+                )
+                if r.new_order_id and r.status == "open":
+                    own_ids.append(str(r.new_order_id))
+                if r.status != "open" or not r.new_order_id or r.fill_count:
+                    raise RuntimeError(f"mass-quote leg {r.leg_index} did not rest post-only")
+            if not mq.success:
+                raise RuntimeError("mass quote rejected")
+            drain_orders("after MASS QUOTE")
+            print(f"Cancelling {len(own_ids)} ladder order(s) by id...")
+            ladder_ids = list(own_ids)
+            await asyncio.sleep(1)
+            for oid in ladder_ids:
+                ack = await client.cancel_order(oid, SYMBOL)
+                if not ack.success:
+                    raise RuntimeError(f"cancel failed for {oid}: {ack.error or ack.error_code}")
+                print(f"  cancel order_id={ack.order_id}", flush=True)
+                own_ids.remove(oid)
+            await assert_own_orders_flat(rest, set(ladder_ids), baseline)
+            drain_orders("after ladder cancel")
         except Exception as e:
-            print_order_error("Cancel SELL rejected", e)
-    except Exception as e:
-        print_order_error("SELL rejected", e)
+            print_order_error("Trading failed", e)
+            failed = True
+            for oid in list(own_ids):
+                try:
+                    await cancel_own(client, oid)
+                    own_ids.remove(oid)
+                except Exception as cancel_err:
+                    print_order_error(f"cancel {oid} rejected", cancel_err)
+            if mark:
+                try:
+                    await flatten_positions(client, rest, baseline, mark)
+                except Exception as flat_err:
+                    print(f"Flatten failed: {flat_err}", file=sys.stderr)
 
-    await asyncio.sleep(1)
-    drain_orders("after SELL/CANCEL")
-
-    # --- Bulk quote (mass quote) -------------------------------------------
-    # Place a whole ladder of resting quotes in a single batched request. With
-    # the default (post_only) mode every leg is post-only: a leg that would
-    # cross is rejected as "failed" so the batch fuses into one MPC round. Pass
-    # post_only=False for the relaxed path, where a crossing leg takes liquidity
-    # up to its limit and rests the remainder (reported per leg as fill_count).
-    # Anchor the ladder/cross to the live BTC mark captured from the snapshot so
-    # the crossing demo below is deterministic regardless of current price. Fall
-    # back to GDX_BASE (default 64000) only if no mark was seen yet.
-    base = last_mark.get("BTC") or os.environ.get("GDX_BASE", "64000")
-    print(f"Mass-quoting a 3-level BUY ladder (post-only), base={base}...")
-    ladder = [
-        {"side": Side.BUY, "price": decimal_mul(base, "0.997"), "quantity": "0.02"},
-        {"side": Side.BUY, "price": decimal_mul(base, "0.994"), "quantity": "0.02"},
-        {"side": Side.BUY, "price": decimal_mul(base, "0.991"), "quantity": "0.02"},
-    ]
-    resting_ids: list[int] = []
-    try:
-        mq = await client.mass_quote(SYMBOL, ladder)
-        print(f"Mass quote: success={mq.success} sequence={mq.sequence} legs={len(mq.results)}")
-        for r in mq.results:
-            print(
-                f"  leg {r.leg_index}: status={r.status} new_order_id={r.new_order_id} "
-                f"fills={r.fill_count} err={r.error_code}",
-                flush=True,
-            )
-            if r.status == "open" and r.new_order_id:
-                resting_ids.append(int(r.new_order_id))
-    except Exception as e:
-        print_order_error("Mass quote rejected", e)
-
-    await asyncio.sleep(1)
-    drain_orders("after MASS QUOTE")
-
-    if resting_ids:
-        print(f"Cancelling {len(resting_ids)} ladder order(s) by id...")
-        for oid in resting_ids:
-            try:
-                ca = await client.cancel_order(str(oid), SYMBOL)
-                print(f"  cancel order_id={ca.order_id}", flush=True)
-            except Exception as e:
-                print_order_error(f"cancel {oid} rejected", e)
-        await asyncio.sleep(0.5)
-        drain_orders("after CANCEL ALL")
-
-    # Demonstrate the batch-level post_only flag on a crossing leg. Price a BUY
-    # ~5% above the live mark: aggressive enough to cross the resting ask, yet
-    # within the exchange's 10%-of-oracle limit. Anchored to the live mark, this
-    # makes the post_only=true (reject) vs false (fill) contrast deterministic.
-    cross_px = decimal_mul(base, "1.05")
-    # post_only=True: a crossing leg is rejected (would-cross, error_code 2018).
-    print("Mass-quoting a crossing BUY with post_only=True (expect rejected/2018)...")
-    try:
-        mq = await client.mass_quote(
-            SYMBOL, [{"side": Side.BUY, "price": cross_px, "quantity": "0.001"}],
-            post_only=True,
-        )
-        for r in mq.results:
-            print(f"  leg {r.leg_index}: status={r.status} err={r.error_code} "
-                  f"fills={r.fill_count}", flush=True)
-    except Exception as e:
-        print_order_error("post_only=True mass quote rejected", e)
-    await asyncio.sleep(0.5)
-
-    # post_only=False still prices below the mark so the leg rests instead of filling.
-    rest_px = decimal_mul(base, "0.95")
-    print(f"Mass-quoting a resting BUY @ {rest_px} with post_only=False (cancelled by id)...")
-    try:
-        mq = await client.mass_quote(
-            SYMBOL, [{"side": Side.BUY, "price": rest_px, "quantity": "0.003"}],
-            post_only=False,
-        )
-        for r in mq.results:
-            print(f"  leg {r.leg_index}: status={r.status} new_order_id={r.new_order_id} "
-                  f"err={r.error_code} fills={r.fill_count}", flush=True)
-    except Exception as e:
-        print_order_error("post_only=False mass quote rejected", e)
-    else:
-        stray_ids = [
-            int(r.new_order_id)
-            for r in mq.results
-            if r.status == "open" and r.new_order_id
-        ]
-        if stray_ids:
-            print(f"Batch-cancelling {len(stray_ids)} post_only=False remainder(s)...")
-            try:
-                bc = await client.batch_cancel(SYMBOL, stray_ids)
-                for r in bc.results:
-                    print(
-                        f"  cancel id={r.order_id}: cancelled={r.cancelled} err={r.error_code}",
-                        flush=True,
-                    )
-            except Exception as e:
-                print_order_error("post_only=False remainder cancel rejected", e)
-    await asyncio.sleep(1)
-    drain_orders("after post_only mass quotes")
-
-    print("Cancelling original BUY (cleanup)...")
-    try:
-        if buy_ack is not None:
-            await client.cancel_order(str(buy_ack.order_id), SYMBOL)
-        print("Original BUY cancelled")
-    except Exception:
-        print("Original BUY already filled or cancelled")
-
-    await asyncio.sleep(0.35)
+    if not failed and own_ids:
+        print(f"Leftover own orders: {own_ids}", file=sys.stderr)
+        failed = True
 
     print(sep)
     print("  Session complete")
@@ -427,8 +377,9 @@ async def main() -> int:
     print(sep)
 
     await client.disconnect()
+    await rest.disconnect()
     print("Disconnected cleanly")
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

@@ -204,9 +204,9 @@ matching `on_*` callback fire for the same item.
 |------|------------------|-------------|
 | `PositionsSnapshot` | `rows: tuple[PositionRow, …]` (`symbol_id, side, size, entry_price, leverage, mark_price, unrealized_pnl, notional, mark_publish_time_sec`), `source` (`INITIAL` / `PERIODIC` / `EVENT`), `server_timestamp` | Hydrate the open-positions table on connect; refresh every ~5s |
 | `SystemHealthUpdate` | `total_nodes`, `accepting_orders`, `ready`, `degraded`, `exhausted`, `warming`, `draining`, `waiting` | Display node-cluster status; pause submissions if `accepting_orders is False` |
-| `BalanceUpdate` | `shielded_balance_raw` (raw lamports-style integer), `timestamp` | Refresh wallet/equity widget after each fill or settlement |
-| `MarginAlert` | `owner`, `symbol_id`, `tier`, `margin_ratio_bps`, `mark_price_bps`, `liquidation_price_bps`, `recovered`, `state_version`, `ts` | Show / clear the margin-tier banner per `(owner, symbol_id)` |
-| `FundingRateUpdate` | `symbol_id`, `current_rate`, `predicted_rate`, `next_funding_time`, `timestamp` | Update funding ticker / book metadata |
+| `BalanceUpdate` | `balance_raw` (raw lamports-style integer), `timestamp` | Refresh wallet/equity widget after each fill or settlement |
+| `MarginAlert` | `owner`, `symbol_id`, `tier`, `margin_ratio_bps`, `mark_price`, `liquidation_price`, `recovered`, `state_version`, `ts` | Show / clear the margin-tier banner per `(owner, symbol_id)` |
+| `FundingRateUpdate` | `symbol_id`, `funding_rate`, `last_funding_rate`, `timestamp` | Update funding ticker / book metadata |
 | `SettlementUpdate` | `batch_id`, `status` (`SettlementBatchStatus`: `SUBMITTED` / `CONFIRMED` / `FAILED`), `tx_signature`, `affected_user_uuids: tuple[str, …]` | Reconcile settled batches, surface Solana tx links |
 
 ### Concurrency rule

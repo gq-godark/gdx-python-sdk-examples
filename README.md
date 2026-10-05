@@ -4,7 +4,7 @@ This repository is a market-maker-facing distribution for GoDark’s Python SDK.
 It includes:
 
 - a vendored **`godark` wheel** (built when you run `scripts/package.sh`) plus full **`sdk/`** sources — **no private godark package registry is required**, same idea as shipping **`libgodark.a`** in the C++ MM bundle or vendoring crates in Rust examples
-- minimal darkpool trading examples (**market** and **limit** orders only in the samples)
+- minimal darkpool trading examples (post-only **limit** orders priced from the live mark)
 - a simple **`.env`** workflow (no shell `export` required)
 
 Third-party libraries (`cryptography`, `websockets`, …) still install from **PyPI** via normal `pip` dependency resolution when you install the wheel or `sdk/` — only the **`godark`** package itself comes entirely from this repo.
@@ -160,7 +160,7 @@ async with GodarkClient(
 | `examples/rest_client_example.py` | REST `client_credentials` auth, account reads, positions |
 | `examples/full_trader_rest.py` | REST snapshots and keyword `place_order` / modify / cancel |
 
-Order-type support in this MM distribution is limited to **`MARKET`** and **`LIMIT`**.
+The trading samples place post-only **`LIMIT`** orders only. They read a live mark (or exit without placing) and cancel only the order that process just placed.
 
 ## Packaging for market makers
 
