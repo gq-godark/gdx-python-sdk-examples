@@ -99,7 +99,7 @@ def _timestamp_ns() -> int:
 
 
 def _env_account() -> str | None:
-    for key in ("GODARK_ACCOUNT", "GDX_ACCOUNT", "GODARK_USER_UUID", "GDX_USER_UUID"):
+    for key in ("GODARK_ACCOUNT", "GDX_ACCOUNT"):
         value = os.environ.get(key, "").strip()
         if value:
             return value

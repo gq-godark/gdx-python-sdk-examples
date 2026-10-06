@@ -29,6 +29,7 @@ from .enums import (
     OrderStatus,
     OrderType,
     OrderUpdateType,
+    PositionUpdateType,
     Side,
     TimeInForce,
 )
@@ -43,6 +44,7 @@ from .errors import (
 )
 from .order_error_code import make_order_error_from_json
 from .types import (
+    AccountMarginUpdate,
     BalanceUpdate,
     BatchCancelAck,
     BatchCancelLegResult,
@@ -190,7 +192,7 @@ def _resolve_account(explicit: str | None) -> str | None:
     """Resolve account: constructor arg wins, then env vars."""
     if explicit is not None and str(explicit).strip() != "":
         return str(explicit).strip()
-    for key in ("GODARK_ACCOUNT", "GDX_ACCOUNT", "GODARK_USER_UUID", "GDX_USER_UUID"):
+    for key in ("GODARK_ACCOUNT", "GDX_ACCOUNT"):
         v = os.environ.get(key, "").strip()
         if v:
             return v
@@ -405,6 +407,9 @@ class GodarkClient:
         self._margin_alert_queue: asyncio.Queue[MarginAlert] = asyncio.Queue(
             maxsize=stream_buffer_size
         )
+        self._account_margin_queue: asyncio.Queue[AccountMarginUpdate] = asyncio.Queue(
+            maxsize=stream_buffer_size
+        )
         self._funding_rate_queue: asyncio.Queue[FundingRateUpdate] = asyncio.Queue(
             maxsize=stream_buffer_size
         )
@@ -429,6 +434,7 @@ class GodarkClient:
         self._system_health_callbacks: list[Callable[[SystemHealthUpdate], None]] = []
         self._balance_callbacks: list[Callable[[BalanceUpdate], None]] = []
         self._margin_alert_callbacks: list[Callable[[MarginAlert], None]] = []
+        self._account_margin_callbacks: list[Callable[[AccountMarginUpdate], None]] = []
         self._funding_rate_callbacks: list[Callable[[FundingRateUpdate], None]] = []
         self._volume_callbacks: list[Callable[[dict[str, Any]], None]] = []
         self._open_interest_callbacks: list[Callable[[dict[str, Any]], None]] = []
@@ -1030,8 +1036,16 @@ class GodarkClient:
         self._balance_callbacks.append(callback)
 
     def on_margin_alert(self, callback: Callable[[MarginAlert], None]) -> None:
-        """Register for margin-tier transitions."""
+        """Register for margin-tier transitions.
+
+        The current edge does not emit ``margin_alert``. Account margin arrives
+        as ``account_margin_update``; use :meth:`on_account_margin`.
+        """
         self._margin_alert_callbacks.append(callback)
+
+    def on_account_margin(self, callback: Callable[[AccountMarginUpdate], None]) -> None:
+        """Register for encrypted ``account_margin_update`` pushes."""
+        self._account_margin_callbacks.append(callback)
 
     def on_funding_rate_update(self, callback: Callable[[FundingRateUpdate], None]) -> None:
         """Register for per-symbol funding rate updates.
@@ -1061,7 +1075,10 @@ class GodarkClient:
         self._open_orders_snapshot_callbacks.append(callback)
 
     def on_settlement_update(self, callback: Callable[[SettlementUpdate], None]) -> None:
-        """Register for settlement-batch lifecycle updates."""
+        """Register for settlement-batch lifecycle updates.
+
+        The current edge does not emit ``settlement_update``.
+        """
         self._settlement_callbacks.append(callback)
 
     def on_leverage_settings(self, callback: Callable[[LeverageSettings], None]) -> None:
@@ -1088,6 +1105,16 @@ class GodarkClient:
 
     async def margin_alerts(self) -> AsyncIterator[MarginAlert]:
         async for u in self._queue_iter(self._margin_alert_queue):
+            yield u
+
+    async def account_margin_updates(self) -> AsyncIterator[AccountMarginUpdate]:
+        """Iterate encrypted ``account_margin_update`` pushes.
+
+        Same buffer as :meth:`on_account_margin`. A consumer must drain this
+        iterator or the callback; otherwise the capped queue drops the oldest
+        update once it is full.
+        """
+        async for u in self._queue_iter(self._account_margin_queue):
             yield u
 
     async def funding_rate_updates(self) -> AsyncIterator[FundingRateUpdate]:
@@ -1628,6 +1655,7 @@ class GodarkClient:
             for cb in self._positions_snapshot_callbacks:
                 with contextlib.suppress(Exception):
                     cb(parsed)
+            self._emit_position_rows_as_updates(parsed)
             return
 
         if isinstance(parsed, SystemHealthUpdate):
@@ -1647,6 +1675,13 @@ class GodarkClient:
         if isinstance(parsed, MarginAlert):
             self._bounded_put(self._margin_alert_queue, parsed)
             for cb in self._margin_alert_callbacks:
+                with contextlib.suppress(Exception):
+                    cb(parsed)
+            return
+
+        if isinstance(parsed, AccountMarginUpdate):
+            self._bounded_put(self._account_margin_queue, parsed)
+            for cb in self._account_margin_callbacks:
                 with contextlib.suppress(Exception):
                     cb(parsed)
             return
@@ -1674,6 +1709,26 @@ class GodarkClient:
                 "Ignoring sequencer push with unknown or empty inner (oneof=%r)",
                 parsed.oneof_field,
             )
+
+    def _emit_position_rows_as_updates(self, snapshot: PositionsSnapshot) -> None:
+        """The live edge sends positions as a snapshot, not ``position_update``."""
+        for row in snapshot.rows:
+            update = PositionUpdate(
+                account=snapshot.account,
+                symbol_id=row.symbol_id,
+                side=row.side,
+                update_type=PositionUpdateType.SNAPSHOT,
+                size=row.size,
+                entry_price=row.entry_price,
+                previous_size="0",
+                fill_price=row.mark_price or "0",
+                fill_qty="0",
+                timestamp=snapshot.server_timestamp,
+            )
+            self._bounded_put(self._position_queue, update)
+            for cb in self._position_callbacks:
+                with contextlib.suppress(Exception):
+                    cb(update)
 
     def _dispatch_open_orders_snapshot(self, snap: OpenOrdersSnapshot) -> None:
         self._bounded_put(self._open_orders_snapshot_queue, snap)
